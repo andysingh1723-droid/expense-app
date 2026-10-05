@@ -16,6 +16,7 @@ jobs:
       - run: |
           cp main.dart lib/main.dart
           cp my_pubspec.yaml pubspec.yaml
+          echo "kotlin.jvm.target.validation.mode=ignore" >> android/gradle.properties
           sed -i 's|<application|<uses-permission android:name="android.permission.READ_SMS"/><uses-permission android:name="android.permission.RECEIVE_SMS"/><application|' android/app/src/main/AndroidManifest.xml
       - run: flutter pub get
       - run: flutter build apk --release
