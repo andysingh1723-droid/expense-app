@@ -9,8 +9,8 @@ const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct
 
 void main() => runApp(MaterialApp(
     debugShowCheckedModeBanner: false,
-    theme: ThemeData(colorSchemeSeed: Colors.teal, useMaterial3: true),
-    darkTheme: ThemeData(colorSchemeSeed: Colors.teal, brightness: Brightness.dark, useMaterial3: true),
+    theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+    darkTheme: ThemeData(colorSchemeSeed: Colors.indigo, brightness: Brightness.dark, useMaterial3: true),
     home: const Home()));
 
 class Tx {
@@ -126,6 +126,8 @@ class _HomeState extends State<Home> {
   double budget = 10000;
   String status = 'Loading...', q = '', type = 'all', src = 'all', range = 'all', mode = 'tx';
   int rd = 30;
+  int tab = 0;
+  DateTimeRange? cr;
   int? pieSel;
   bool listening = false;
   SharedPreferences? sp;
@@ -189,7 +191,7 @@ class _HomeState extends State<Home> {
   }
 
   List<Tx> get all => [...sms, ...manual];
-  String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' ? 'Unknown' : t.party);
+  String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
 
   String dayLabel(DateTime d) {
     final n = DateTime.now();
@@ -200,7 +202,11 @@ class _HomeState extends State<Home> {
 
   List<Tx> filtered() {
     final now = DateTime.now();
-    final from = range == '7'
+    final from = range == 'c'
+        ? cr?.start
+        : range == '15'
+            ? now.subtract(const Duration(days: 15))
+            : range == '7'
         ? now.subtract(const Duration(days: 7))
         : range == '30'
             ? now.subtract(const Duration(days: 30))
@@ -213,6 +219,7 @@ class _HomeState extends State<Home> {
       if (type == 'inc' && t.debit) return false;
       if (src != 'all' && t.bank != src && t.acc != src) return false;
       if (from != null && t.d.isBefore(from)) return false;
+      if (range == 'c' && cr != null && !t.d.isBefore(cr!.end.add(const Duration(days: 1)))) return false;
       if (s.isEmpty) return true;
       final hay =
           '${nm(t)} ${t.party} ${t.bank} ${t.acc} ${t.method} ${t.ref} ${t.amt} ${t.amt.round()} ${t.debit ? 'debit expense sent' : 'credit income received'}'
@@ -223,197 +230,355 @@ class _HomeState extends State<Home> {
     return out;
   }
 
+  final rev = ValueNotifier<int>(0);
+  static const gc = Color(0xFF34C77B), rc = Color(0xFFF0616D);
+  ColorScheme get cs => Theme.of(context).colorScheme;
+  TextStyle get sub => TextStyle(fontSize: 12, color: cs.onSurfaceVariant);
+
+  Widget card(Widget child, {VoidCallback? onTap, EdgeInsets pad = const EdgeInsets.all(14)}) => Material(
+      color: cs.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(borderRadius: BorderRadius.circular(20), onTap: onTap, child: Padding(padding: pad, child: child)));
+
+  Widget head(String t, {String? sub}) => Padding(
+      padding: const EdgeInsets.fromLTRB(4, 12, 0, 12),
+      child: Row(children: [
+        Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(t, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
+          if (sub != null) Text(sub, style: TextStyle(color: cs.onSurfaceVariant)),
+        ])),
+        IconButton(icon: const Icon(Icons.refresh), onPressed: load),
+      ]));
+
+  Widget stat(String label, String value, Color c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(label, style: sub),
+        const SizedBox(height: 2),
+        Text(value, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: c)),
+      ]);
+
+  Widget chips(Map<String, String> o, String cur, void Function(String) on) => SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(children: [
+        for (final e in o.entries)
+          Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(label: Text(e.value), selected: cur == e.key, onSelected: (_) => on(e.key)))
+      ]));
+
   @override
   Widget build(BuildContext context) {
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Mera Kharcha'),
-          actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: load)],
-          bottom: const TabBar(tabs: [Tab(text: 'Transactions'), Tab(text: 'Reports')]),
-        ),
-        floatingActionButton: FloatingActionButton(onPressed: addManual, child: const Icon(Icons.add)),
-        body: status.isNotEmpty
-            ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(status)))
-            : TabBarView(children: [txTab(), reportTab()]),
-      ),
+    Widget page() {
+      switch (tab) {
+        case 1:
+          return txPage();
+        case 2:
+          return reportPage();
+        case 3:
+          return budgetPage();
+        default:
+          return home();
+      }
+    }
+
+    return Scaffold(
+      body: SafeArea(
+          child: status.isNotEmpty
+              ? Center(child: Padding(padding: const EdgeInsets.all(24), child: Text(status, textAlign: TextAlign.center)))
+              : page()),
+      floatingActionButton: tab <= 1
+          ? FloatingActionButton.extended(onPressed: addManual, icon: const Icon(Icons.add), label: const Text('Add'))
+          : null,
+      bottomNavigationBar: NavigationBar(
+          selectedIndex: tab,
+          onDestinationSelected: (i) => setState(() => tab = i),
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
+            NavigationDestination(
+                icon: Icon(Icons.receipt_long_outlined), selectedIcon: Icon(Icons.receipt_long), label: 'Transactions'),
+            NavigationDestination(icon: Icon(Icons.bar_chart_outlined), selectedIcon: Icon(Icons.bar_chart), label: 'Reports'),
+            NavigationDestination(
+                icon: Icon(Icons.account_balance_wallet_outlined),
+                selectedIcon: Icon(Icons.account_balance_wallet),
+                label: 'Budget'),
+          ]),
     );
   }
 
-  Widget txTab() {
+  Widget budgetCard(double sp) {
+    final p = budget <= 0 ? 0.0 : (sp / budget).clamp(0.0, 1.0).toDouble();
+    final over = sp > budget;
+    return card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Expanded(child: Text('Monthly Budget', style: TextStyle(fontWeight: FontWeight.bold))),
+        IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.edit, size: 20), onPressed: editBudget),
+      ]),
+      Text('${money(sp)} / ${money(budget)}'),
+      const SizedBox(height: 8),
+      ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: LinearProgressIndicator(value: p, minHeight: 10, color: over ? rc : gc)),
+      const SizedBox(height: 6),
+      Text(over ? 'Budget cross ho gaya!' : '${money(budget - sp)} bacha hai',
+          style: TextStyle(color: over ? rc : cs.onSurfaceVariant)),
+    ]));
+  }
+
+  Widget txCard(Tx t) {
+    final c = t.debit ? rc : gc;
+    return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: card(
+            onTap: () => detail(t),
+            Row(children: [
+              CircleAvatar(
+                  backgroundColor: c.withOpacity(0.15),
+                  child: Icon(t.debit ? Icons.arrow_upward : Icons.arrow_downward, color: c, size: 20)),
+              const SizedBox(width: 12),
+              Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(nm(t), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text('${dt(t.d)} \u2022 ${tm(t.d)}', style: sub),
+                Text('${t.bank} \u2022 ${t.acc} \u2022 ${t.method}', style: sub),
+              ])),
+              const SizedBox(width: 8),
+              Text('${t.debit ? '-' : '+'}${money(t.amt)}', style: TextStyle(fontWeight: FontWeight.bold, color: c)),
+            ])));
+  }
+
+  Widget peopleCard(List<Tx> l) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: card(
+          onTap: () => personPage(l),
+          Row(children: [
+            const CircleAvatar(child: Icon(Icons.person)),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(nm(l.first), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text('${l.length} transactions', style: sub),
+              Text('Last: ${dt(l.first.d)}', style: sub),
+            ])),
+            const SizedBox(width: 8),
+            Text(spent(l) > 0 ? 'Sent ${money(spent(l))}' : 'Received ${money(got(l))}',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+          ])));
+
+  Widget home() {
+    final n = DateTime.now();
+    final m = all.where((t) => t.d.year == n.year && t.d.month == n.month).toList();
+    final bal = got(m) - spent(m);
+    final rec = all.toList()..sort((a, b) => b.d.compareTo(a.d));
+    return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 96), children: [
+      head('Mera Kharcha', sub: '${n.day} ${mon[n.month - 1]} ${n.year}'),
+      Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(color: cs.primaryContainer, borderRadius: BorderRadius.circular(24)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${mon[n.month - 1]} balance', style: TextStyle(color: cs.onPrimaryContainer)),
+          const SizedBox(height: 6),
+          Text('${bal < 0 ? '-' : ''}${money(bal.abs())}',
+              style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: cs.onPrimaryContainer)),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(child: stat('Income', money(got(m)), gc)),
+            Expanded(child: stat('Expense', money(spent(m)), rc)),
+          ]),
+        ]),
+      ),
+      const SizedBox(height: 14),
+      budgetCard(spent(m)),
+      const SizedBox(height: 18),
+      Row(children: [
+        const Expanded(child: Text('Recent Transactions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+        TextButton(onPressed: () => setState(() => tab = 1), child: const Text('See all')),
+      ]),
+      if (rec.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('Abhi koi transaction nahi'))),
+      for (final t in rec.take(6)) txCard(t),
+    ]);
+  }
+
+  Future<void> pickRange(String v) async {
+    if (v == 'c') {
+      final now = DateTime.now();
+      final r = await showDateRangePicker(context: context, firstDate: DateTime(2015), lastDate: now);
+      if (r != null) setState(() {
+        cr = r;
+        range = 'c';
+      });
+    } else {
+      setState(() => range = v);
+    }
+  }
+
+  Widget txPage() {
     final f = filtered();
     final srcs = <String>{
       for (final t in all) ...[if (t.bank != 'Unknown') t.bank, if (t.acc != 'Unknown') t.acc]
     };
     final sv = srcs.contains(src) ? src : 'all';
-    return Column(children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-        child: TextField(
-          controller: qc,
-          onChanged: (v) => setState(() => q = v),
-          decoration: InputDecoration(
-              prefixIcon: const Icon(Icons.search),
-              hintText: 'Naam, bank, 8916, amount, UPI...',
-              isDense: true,
-              border: const OutlineInputBorder(),
-              suffixIcon: q.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        qc.clear();
-                        setState(() => q = '');
-                      })),
-        ),
-      ),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Row(children: [
-          for (final e in const {'all': 'All', 'exp': 'Expense', 'inc': 'Income'}.entries)
-            Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: ChoiceChip(
-                    label: Text(e.value), selected: type == e.key, onSelected: (_) => setState(() => type = e.key))),
-          const SizedBox(width: 6),
-          DropdownButton<String>(
-              value: sv,
-              items: [
-                const DropdownMenuItem(value: 'all', child: Text('Sab bank/account')),
-                for (final s in srcs) DropdownMenuItem(value: s, child: Text(s))
-              ],
-              onChanged: (v) => setState(() => src = v ?? 'all')),
-          const SizedBox(width: 12),
-          DropdownButton<String>(
-              value: range,
-              items: const [
-                DropdownMenuItem(value: 'all', child: Text('Sab dates')),
-                DropdownMenuItem(value: '7', child: Text('7 din')),
-                DropdownMenuItem(value: '30', child: Text('30 din')),
-                DropdownMenuItem(value: 'm', child: Text('Is mahine')),
-              ],
-              onChanged: (v) => setState(() => range = v ?? 'all')),
-        ]),
-      ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-        child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text('${f.length} txns'),
-          Text('In ${money(got(f))}', style: const TextStyle(color: Colors.green)),
-          Text('Out ${money(spent(f))}', style: const TextStyle(color: Colors.red)),
-          Text('Net ${got(f) - spent(f) < 0 ? '-' : ''}${money((got(f) - spent(f)).abs())}'),
-        ]),
-      ),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: SegmentedButton<String>(
-          segments: const [
-            ButtonSegment(value: 'tx', label: Text('Transactions')),
-            ButtonSegment(value: 'ppl', label: Text('People'))
-          ],
-          selected: {mode},
-          onSelectionChanged: (s) => setState(() => mode = s.first),
-        ),
-      ),
-      Expanded(child: mode == 'tx' ? txList(f) : peopleList(f)),
-    ]);
-  }
-
-  Widget txList(List<Tx> f) {
-    if (f.isEmpty) return const Center(child: Text('Koi transaction nahi mila'));
+    final net = got(f) - spent(f);
     final items = <Object>[];
-    String? last;
-    for (final t in f) {
-      final k = dayLabel(t.d);
-      if (k != last) {
-        items.add(k);
-        last = k;
+    if (mode == 'tx') {
+      String? last;
+      for (final t in f) {
+        final k = dayLabel(t.d);
+        if (k != last) {
+          items.add(k);
+          last = k;
+        }
+        items.add(t);
       }
-      items.add(t);
+    } else {
+      final g = <String, List<Tx>>{};
+      for (final t in f) {
+        (g[nm(t).toLowerCase()] ??= []).add(t);
+      }
+      final keys = g.keys.toList()
+        ..sort((a, b) => (spent(g[b]!) + got(g[b]!)).compareTo(spent(g[a]!) + got(g[a]!)));
+      for (final k in keys) {
+        items.add(g[k]!);
+      }
     }
+    if (items.isEmpty) items.add('Koi transaction nahi mila');
+    final header = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      head('Transactions'),
+      TextField(
+        controller: qc,
+        onChanged: (v) => setState(() => q = v),
+        decoration: InputDecoration(
+            filled: true,
+            fillColor: cs.surfaceContainerHigh,
+            prefixIcon: const Icon(Icons.search),
+            hintText: 'Name, bank, account, amount or UPI',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+            suffixIcon: q.isEmpty
+                ? null
+                : IconButton(
+                    icon: const Icon(Icons.clear),
+                    onPressed: () {
+                      qc.clear();
+                      setState(() => q = '');
+                    })),
+      ),
+      const SizedBox(height: 10),
+      chips(const {'all': 'All', 'exp': 'Expense', 'inc': 'Income'}, type, (v) => setState(() => type = v)),
+      const SizedBox(height: 4),
+      chips({'all': 'All Banks', for (final s in srcs) s: s}, sv, (v) => setState(() => src = v)),
+      const SizedBox(height: 4),
+      chips({
+        'all': 'All Time',
+        '7': '7 Days',
+        '15': '15 Days',
+        '30': '1 Month',
+        'c': cr == null ? 'Custom' : '${dt(cr!.start)} - ${dt(cr!.end)}'
+      }, range, pickRange),
+      const SizedBox(height: 12),
+      card(Row(children: [
+        Expanded(child: stat('Txns', '${f.length}', cs.onSurface)),
+        Expanded(child: stat('Income', money(got(f)), gc)),
+        Expanded(child: stat('Expense', money(spent(f)), rc)),
+        Expanded(child: stat('Net', '${net < 0 ? '-' : ''}${money(net.abs())}', cs.onSurface)),
+      ])),
+      const SizedBox(height: 12),
+      Center(
+          child: SegmentedButton<String>(
+        segments: const [
+          ButtonSegment(value: 'tx', label: Text('Transactions'), icon: Icon(Icons.receipt_long)),
+          ButtonSegment(value: 'ppl', label: Text('People'), icon: Icon(Icons.people))
+        ],
+        selected: {mode},
+        onSelectionChanged: (s) => setState(() => mode = s.first),
+      )),
+      const SizedBox(height: 8),
+    ]);
     return ListView.builder(
-        itemCount: items.length,
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 96),
+        itemCount: items.length + 1,
         itemBuilder: (_, i) {
-          final it = items[i];
+          if (i == 0) return header;
+          final it = items[i - 1];
           if (it is String) {
             return Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                child: Text(it, style: const TextStyle(fontWeight: FontWeight.bold)));
+                padding: const EdgeInsets.only(top: 10, bottom: 8),
+                child: Text(it, style: TextStyle(fontWeight: FontWeight.bold, color: cs.onSurfaceVariant)));
           }
-          return tile(it as Tx);
+          if (it is Tx) return txCard(it);
+          return peopleCard(it as List<Tx>);
         });
   }
 
-  Widget tile(Tx t) => ListTile(
-        onTap: () => detail(t),
-        isThreeLine: true,
-        leading: Icon(t.debit ? Icons.arrow_upward : Icons.arrow_downward,
-            color: t.debit ? Colors.red : Colors.green),
-        title: Text(nm(t), maxLines: 1, overflow: TextOverflow.ellipsis),
-        subtitle: Text('${dt(t.d)} \u2022 ${tm(t.d)}\n${t.bank} \u2022 ${t.acc} \u2022 ${t.method}'),
-        trailing: Text('${t.debit ? '-' : '+'}${money(t.amt)}',
-            style: TextStyle(fontWeight: FontWeight.bold, color: t.debit ? Colors.red : Colors.green)),
-      );
-
-  Widget peopleList(List<Tx> f) {
-    if (f.isEmpty) return const Center(child: Text('Koi transaction nahi mila'));
-    final g = <String, List<Tx>>{};
-    for (final t in f) {
-      (g[nm(t).toLowerCase()] ??= []).add(t);
-    }
-    final keys = g.keys.toList()
-      ..sort((a, b) => (spent(g[b]!) + got(g[b]!)).compareTo(spent(g[a]!) + got(g[a]!)));
-    return ListView.builder(
-        itemCount: keys.length,
-        itemBuilder: (_, i) {
-          final l = g[keys[i]]!;
-          return ListTile(
-            onTap: () => personSheet(nm(l.first), l),
-            leading: const CircleAvatar(child: Icon(Icons.person)),
-            title: Text(nm(l.first), maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text('${l.length} transactions\nLast: ${dt(l.first.d)}'),
-            isThreeLine: true,
-            trailing: Text('Sent ${money(spent(l))}'),
-          );
-        });
-  }
-
-  void personSheet(String title, List<Tx> l) {
-    showModalBottomSheet(
-        context: context,
-        isScrollControlled: true,
-        builder: (_) => DraggableScrollableSheet(
-            expand: false,
-            initialChildSize: 0.85,
-            builder: (_, sc) => ListView(controller: sc, children: [
-                  Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 6),
-                        Text('Total sent: ${money(spent(l))}'),
-                        Text('Total received: ${money(got(l))}'),
-                        Text('Net: ${got(l) - spent(l) < 0 ? '-' : ''}${money((got(l) - spent(l)).abs())}'),
-                        Text('Transactions: ${l.length}'),
-                      ])),
-                  const Divider(height: 1),
-                  for (final t in l) tile(t),
-                ])));
+  void personPage(List<Tx> l) {
+    final ids = l.map((e) => e.id).toSet();
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => ValueListenableBuilder<int>(
+                valueListenable: rev,
+                builder: (ctx, _, __) {
+                  final g = all.where((t) => ids.contains(t.id)).toList()..sort((a, b) => b.d.compareTo(a.d));
+                  if (g.isEmpty) return const Scaffold();
+                  final items = <Object>[];
+                  String? last;
+                  for (final t in g) {
+                    final k = dayLabel(t.d);
+                    if (k != last) {
+                      items.add(k);
+                      last = k;
+                    }
+                    items.add(t);
+                  }
+                  return Scaffold(
+                    appBar: AppBar(
+                        title: Text(nm(g.first), overflow: TextOverflow.ellipsis),
+                        actions: [
+                          TextButton.icon(
+                              onPressed: () => rename(g.first, group: true),
+                              icon: const Icon(Icons.edit, size: 18),
+                              label: const Text('Rename'))
+                        ]),
+                    body: ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                        itemCount: items.length + 1,
+                        itemBuilder: (_, i) {
+                          if (i == 0) {
+                            return Padding(
+                                padding: const EdgeInsets.only(bottom: 8),
+                                child: card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                  Text(spent(g) > 0 ? 'Total sent' : 'Total received', style: sub),
+                                  Text(money(spent(g) > 0 ? spent(g) : got(g)),
+                                      style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+                                  const SizedBox(height: 4),
+                                  Text('${g.length} transactions'
+                                      '${spent(g) > 0 && got(g) > 0 ? '  \u2022  Received ${money(got(g))}' : ''}'),
+                                ])));
+                          }
+                          final it = items[i - 1];
+                          if (it is String) {
+                            return Padding(
+                                padding: const EdgeInsets.only(top: 10, bottom: 8),
+                                child: Text(it, style: TextStyle(fontWeight: FontWeight.bold, color: cs.onSurfaceVariant)));
+                          }
+                          return txCard(it as Tx);
+                        }),
+                  );
+                })));
   }
 
   void detail(Tx t) {
     showModalBottomSheet(
         context: context,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
         builder: (_) => Padding(
             padding: const EdgeInsets.all(20),
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(t.debit ? 'Expense' : 'Income', style: TextStyle(color: t.debit ? Colors.red : Colors.green)),
+              Text(t.debit ? 'Expense' : 'Income', style: TextStyle(color: t.debit ? rc : gc)),
               Text(money(t.amt), style: const TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
               Text(nm(t), style: const TextStyle(fontSize: 18)),
-              if (nm(t) != t.party && t.party != '-') Text('Original: ${t.party}'),
+              if (nm(t) != t.party && t.party != '-') Text('Original: ${t.party}', style: sub),
               const SizedBox(height: 8),
               Text('${dt(t.d)}  ${tm(t.d)}'),
               Text('Bank: ${t.bank}'),
@@ -428,7 +593,7 @@ class _HomeState extends State<Home> {
                       rename(t);
                     },
                     icon: const Icon(Icons.edit),
-                    label: const Text('Naam badlo')),
+                    label: const Text('Rename')),
                 if (t.manual) ...[
                   const SizedBox(width: 8),
                   TextButton(
@@ -436,6 +601,7 @@ class _HomeState extends State<Home> {
                         Navigator.pop(context);
                         setState(() => manual.removeWhere((x) => x.id == t.id));
                         saveManual();
+                        rev.value++;
                       },
                       child: const Text('Delete'))
                 ]
@@ -443,25 +609,38 @@ class _HomeState extends State<Home> {
             ])));
   }
 
-  void rename(Tx t) {
-    final c = TextEditingController(text: nm(t));
-    var grp = false;
+  void rename(Tx t, {bool group = false}) {
+    final c = TextEditingController(text: nm(t) == 'Unknown recipient' ? '' : nm(t));
+    var grp = group && t.party != '-';
     showDialog(
         context: context,
         builder: (_) => StatefulBuilder(
             builder: (ctx, ss) => AlertDialog(
-                  title: const Text('Naam badlo'),
-                  content: Column(mainAxisSize: MainAxisSize.min, children: [
-                    TextField(controller: c, autofocus: true),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                  title: const Text('Rename transaction'),
+                  content: SingleChildScrollView(
+                      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Original:', style: sub),
+                    Text(t.party == '-' ? 'Unknown' : t.party),
+                    const SizedBox(height: 14),
+                    Text('New name:', style: sub),
+                    const SizedBox(height: 6),
+                    TextField(
+                        controller: c,
+                        autofocus: true,
+                        decoration: InputDecoration(
+                            filled: true,
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none))),
                     if (t.party != '-')
                       CheckboxListTile(
                           contentPadding: EdgeInsets.zero,
                           value: grp,
                           onChanged: (v) => ss(() => grp = v ?? false),
                           title: const Text('Is party ke sabhi transactions ka')),
-                  ]),
+                  ])),
                   actions: [
-                    TextButton(
+                    TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                    FilledButton(
                         onPressed: () {
                           final n = c.text.trim();
                           setState(() {
@@ -476,6 +655,7 @@ class _HomeState extends State<Home> {
                             }
                           });
                           saveNames();
+                          rev.value++;
                           Navigator.pop(ctx);
                         },
                         child: const Text('Save'))
@@ -524,7 +704,7 @@ class _HomeState extends State<Home> {
                 )));
   }
 
-  Widget reportTab() {
+  Widget reportPage() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final start = today.subtract(Duration(days: rd - 1));
@@ -537,103 +717,144 @@ class _HomeState extends State<Home> {
       (t.debit ? ex : inc)[i] += t.amt;
       cnt[i]++;
     }
-    final byAcc = <String, double>{}, accCnt = <String, int>{};
+    final byAcc = <String, double>{}, accCnt = <String, int>{}, top = <String, double>{};
     for (final t in l.where((t) => t.debit)) {
       final k = t.bank == 'Unknown' || t.bank == t.acc ? t.acc : '${t.bank} ${t.acc}';
       byAcc[k] = (byAcc[k] ?? 0) + t.amt;
       accCnt[k] = (accCnt[k] ?? 0) + 1;
+      top[nm(t)] = (top[nm(t)] ?? 0) + t.amt;
     }
     final keys = byAcc.keys.toList();
-    final monthSpent = spent(all.where((t) => t.d.year == now.year && t.d.month == now.month).toList());
-    final over = monthSpent > budget;
+    final tk = top.keys.toList()..sort((a, b) => top[b]!.compareTo(top[a]!));
     final step = rd <= 7 ? 1 : rd <= 15 ? 2 : 5;
-    final colors = [Colors.blue, Colors.orange, Colors.green, Colors.purple, Colors.red, Colors.teal];
+    final colors = [Colors.indigo, Colors.purple, Colors.teal, Colors.orange, Colors.pink, Colors.cyan];
     final net = got(l) - spent(l);
-    return ListView(padding: const EdgeInsets.all(16), children: [
-      Wrap(spacing: 8, children: [
-        for (final e in const {7: '7 Days', 15: '15 Days', 30: '1 Month'}.entries)
-          ChoiceChip(
-              label: Text(e.value),
-              selected: rd == e.key,
-              onSelected: (_) => setState(() {
-                    rd = e.key;
-                    pieSel = null;
-                  }))
-      ]),
-      const SizedBox(height: 8),
-      Card(
-          child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Expense: ${money(spent(l))}', style: const TextStyle(color: Colors.red)),
-                Text('Income: ${money(got(l))}', style: const TextStyle(color: Colors.green)),
-                Text('Net: ${net < 0 ? '-' : ''}${money(net.abs())}'),
-                Text('Transactions: ${l.length}'),
-              ]))),
-      Card(
-        child: ListTile(
-          title: Text('Is mahine: ${money(monthSpent)} / ${money(budget)}'),
-          subtitle: Text(over ? 'Budget cross ho gaya!' : 'Budget ke andar',
-              style: TextStyle(color: over ? Colors.red : Colors.green)),
-          trailing: IconButton(icon: const Icon(Icons.edit), onPressed: editBudget),
+    const gap = SizedBox(height: 14);
+    return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 24), children: [
+      head('Reports'),
+      chips(const {'7': '7 Days', '15': '15 Days', '30': '1 Month'}, '$rd', (v) => setState(() {
+            rd = int.parse(v);
+            pieSel = null;
+          })),
+      gap,
+      card(Row(children: [
+        Expanded(child: stat('Expense', money(spent(l)), rc)),
+        Expanded(child: stat('Income', money(got(l)), gc)),
+        Expanded(child: stat('Net', '${net < 0 ? '-' : ''}${money(net.abs())}', cs.onSurface)),
+      ])),
+      gap,
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Daily expense (tap a bar)', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 240,
+          child: BarChart(BarChartData(
+            gridData: const FlGridData(show: false),
+            borderData: FlBorderData(show: false),
+            barGroups: [
+              for (var i = 0; i < rd; i++)
+                BarChartGroupData(x: i, barRods: [
+                  BarChartRodData(
+                      toY: ex[i],
+                      color: cs.primary,
+                      borderRadius: BorderRadius.circular(4),
+                      width: rd <= 7 ? 18 : rd <= 15 ? 12 : 6)
+                ])
+            ],
+            barTouchData: BarTouchData(
+                touchTooltipData: BarTouchTooltipData(
+                    getTooltipItem: (g, gi, r, ri) => BarTooltipItem(
+                        '${dt(days[gi])}\nExpense ${money(ex[gi])}\nIncome ${money(inc[gi])}\n${cnt[gi]} txns',
+                        const TextStyle(color: Colors.white, fontSize: 12)))),
+            titlesData: FlTitlesData(
+              topTitles: const AxisTitles(),
+              rightTitles: const AxisTitles(),
+              leftTitles: const AxisTitles(),
+              bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                      showTitles: true,
+                      getTitlesWidget: (v, _) => v.toInt() % step == 0 && v.toInt() < rd
+                          ? Text('${days[v.toInt()].day}', style: const TextStyle(fontSize: 11))
+                          : const SizedBox())),
+            ),
+          )),
         ),
-      ),
-      const SizedBox(height: 12),
-      const Text('Daily kharcha (bar dabao)', style: TextStyle(fontWeight: FontWeight.bold)),
-      SizedBox(
-        height: 220,
-        child: BarChart(BarChartData(
-          barGroups: [
-            for (var i = 0; i < rd; i++)
-              BarChartGroupData(x: i, barRods: [
-                BarChartRodData(toY: ex[i], color: Colors.blue, width: rd <= 7 ? 18 : rd <= 15 ? 12 : 6)
-              ])
-          ],
-          barTouchData: BarTouchData(
-              touchTooltipData: BarTouchTooltipData(
-                  getTooltipItem: (g, gi, r, ri) => BarTooltipItem(
-                      '${dt(days[gi])}\nExpense ${money(ex[gi])}\nIncome ${money(inc[gi])}\n${cnt[gi]} txns',
-                      const TextStyle(color: Colors.white, fontSize: 12)))),
-          titlesData: FlTitlesData(
-            topTitles: const AxisTitles(),
-            rightTitles: const AxisTitles(),
-            leftTitles: const AxisTitles(),
-            bottomTitles: AxisTitles(
-                sideTitles: SideTitles(
-                    showTitles: true,
-                    getTitlesWidget: (v, _) => v.toInt() % step == 0 && v.toInt() < rd
-                        ? Text('${days[v.toInt()].day}', style: const TextStyle(fontSize: 11))
-                        : const SizedBox())),
-          ),
-        )),
-      ),
-      const SizedBox(height: 20),
-      const Text('Account-wise kharcha (hissa dabao)', style: TextStyle(fontWeight: FontWeight.bold)),
-      SizedBox(
-        height: 220,
-        child: PieChart(PieChartData(
-          pieTouchData: PieTouchData(touchCallback: (e, r) {
-            if (e is FlTapUpEvent) {
-              final i = r?.touchedSection?.touchedSectionIndex;
-              setState(() => pieSel = (i == null || i < 0) ? null : i);
-            }
-          }),
-          sections: [
-            for (var i = 0; i < keys.length; i++)
-              PieChartSectionData(
-                  value: byAcc[keys[i]],
-                  title: keys[i],
-                  radius: pieSel == i ? 80 : 70,
-                  titleStyle: const TextStyle(fontSize: 9, color: Colors.white),
-                  color: colors[i % colors.length])
-          ],
-        )),
-      ),
-      if (pieSel != null && pieSel! < keys.length)
+      ])),
+      gap,
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Account-wise spending (tap a slice)', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 220,
+          child: PieChart(PieChartData(
+            sectionsSpace: 2,
+            centerSpaceRadius: 36,
+            pieTouchData: PieTouchData(touchCallback: (e, r) {
+              if (e is FlTapUpEvent) {
+                final i = r?.touchedSection?.touchedSectionIndex;
+                setState(() => pieSel = (i == null || i < 0) ? null : i);
+              }
+            }),
+            sections: [
+              for (var i = 0; i < keys.length; i++)
+                PieChartSectionData(
+                    value: byAcc[keys[i]],
+                    title: '',
+                    radius: pieSel == i ? 62 : 52,
+                    color: colors[i % colors.length])
+            ],
+          )),
+        ),
+        const SizedBox(height: 8),
+        Wrap(spacing: 12, runSpacing: 4, children: [
+          for (var i = 0; i < keys.length; i++)
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.circle, size: 10, color: colors[i % colors.length]),
+              const SizedBox(width: 4),
+              Text(keys[i], style: sub),
+            ])
+        ]),
+        if (pieSel != null && pieSel! < keys.length)
+          Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text('${keys[pieSel!]}: ${money(byAcc[keys[pieSel!]]!)} \u2022 ${accCnt[keys[pieSel!]]} transactions',
+                  style: const TextStyle(fontWeight: FontWeight.bold))),
+      ])),
+      gap,
+      const Text('Top spending people / merchants', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 8),
+      if (tk.isEmpty) const Text('Is period me koi kharcha nahi'),
+      for (final k in tk.take(5))
         Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text('${keys[pieSel!]}: ${money(byAcc[keys[pieSel!]]!)} \u2022 ${accCnt[keys[pieSel!]]} transactions',
-                style: const TextStyle(fontWeight: FontWeight.bold))),
+            padding: const EdgeInsets.only(bottom: 8),
+            child: card(Row(children: [
+              const CircleAvatar(radius: 16, child: Icon(Icons.person, size: 18)),
+              const SizedBox(width: 12),
+              Expanded(child: Text(k, maxLines: 1, overflow: TextOverflow.ellipsis)),
+              Text(money(top[k]!), style: const TextStyle(fontWeight: FontWeight.bold)),
+            ]))),
+    ]);
+  }
+
+  Widget budgetPage() {
+    final n = DateTime.now();
+    final sp = spent(all.where((t) => t.d.year == n.year && t.d.month == n.month).toList());
+    final dim = DateTime(n.year, n.month + 1, 0).day;
+    final left = dim - n.day + 1;
+    final safe = (budget - sp) / left;
+    return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 24), children: [
+      head('Budget', sub: '${mon[n.month - 1]} ${n.year}'),
+      budgetCard(sp),
+      const SizedBox(height: 14),
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        stat('Daily average so far', money(sp / n.day), cs.onSurface),
+        const SizedBox(height: 12),
+        stat('Mahine ke baaki din', '$left', cs.onSurface),
+        const SizedBox(height: 12),
+        stat('Roz kitna kharch kar sakte ho', safe > 0 ? money(safe) : '${rs}0', safe > 0 ? gc : rc),
+      ])),
+      const SizedBox(height: 14),
+      FilledButton.tonalIcon(onPressed: editBudget, icon: const Icon(Icons.edit), label: const Text('Edit budget')),
     ]);
   }
 
