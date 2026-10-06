@@ -905,6 +905,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   DateTime startD = DateTime(2000);
   bool emBusy = false;
   String emStatus = '';
+  bool busy = false;
+  DateTime emStart = DateTime(2000);
 
   bool near(Tx a, Tx b) =>
       a.amt == b.amt &&
@@ -947,14 +949,16 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
 
   Future<void> syncEmail() async {
     final addr = sp?.getString('eAddr'), pass = sp?.getString('ePass');
-    if (addr == null || pass == null || emBusy) return;
+    if (addr == null || pass == null) return;
+    if (emBusy && DateTime.now().difference(emStart).inSeconds < 100) return;
     emBusy = true;
+    emStart = DateTime.now();
     final client = mail.ImapClient(isLogEnabled: false);
     try {
-      await client.connectToServer('imap.gmail.com', 993, isSecure: true);
-      await client.login(addr, pass);
+      await client.connectToServer('imap.gmail.com', 993, isSecure: true).timeout(const Duration(seconds: 25));
+      await client.login(addr, pass).timeout(const Duration(seconds: 25));
       await client.selectInbox();
-      final r = await client.fetchRecentMessages(messageCount: 150, criteria: 'BODY.PEEK[]');
+      final r = await client.fetchRecentMessages(messageCount: 100, criteria: 'BODY.PEEK[]').timeout(const Duration(seconds: 90));
       final out = <Tx>[];
       final ids = <String>{};
       for (final m in r.messages) {
@@ -1067,6 +1071,22 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     ];
   }
 
+  Future<void> doRefresh() async {
+    if (busy) return;
+    setState(() => busy = true);
+    snack('Refresh ho raha hai...');
+    try {
+      await load();
+      await syncEmail();
+    } catch (e) {
+      snack('Refresh me dikkat: $e');
+    }
+    if (!mounted) return;
+    setState(() => busy = false);
+    final a = all;
+    snack('Refresh ho gaya \u2022 SMS ${a.where((t) => !t.manual && t.src == 'sms').length} \u2022 Email ${a.where((t) => t.src == 'email').length}');
+  }
+
   List<Tx> get all => [...sms, ...mails, ...manual].where((t) => !hidden.contains(t.id) && !t.d.isBefore(startD)).toList();
   String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
 
@@ -1128,11 +1148,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           if (sub != null) Text(sub, style: TextStyle(color: cs.onSurfaceVariant)),
         ])),
         IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: () async {
-              await load();
-              await syncEmail();
-            }),
+            icon: busy
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.refresh),
+            onPressed: doRefresh),
       ]));
 
   Widget stat(String label, String value, Color c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
