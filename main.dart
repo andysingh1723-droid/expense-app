@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:enough_mail/enough_mail.dart' as mail;
@@ -20,18 +22,24 @@ const incCats = ['Salary', 'Cashback', 'Refund', 'Other income'];
 List<String> catsFor(String k) => k == 'income' ? incCats : k == 'expense' ? expCats : const ['Transfer'];
 String sm(double v) => '${v < 0 ? '-' : ''}${money(v.abs())}';
 
+final _catRes = <MapEntry<String, RegExp>>[
+  MapEntry('Food', RegExp(r'swiggy|zomato|restaurant|cafe|hotel|dominos|pizza|food|bakery|tea|juice')),
+  MapEntry('Grocery', RegExp(r'grocer|kirana|mart|store|general|vegetable|milk|dairy|bigbasket|blinkit|zepto')),
+  MapEntry('Travel', RegExp(r'uber|ola|irctc|fuel|petrol|diesel|metro|bus|railway|travel|redbus|rapido')),
+  MapEntry('Shopping', RegExp(r'amazon|flipkart|myntra|meesho|ajio|shop|fashion|mall')),
+  MapEntry('Bills', RegExp(r'jio|airtel|vodafone|electric|bill|recharge|broadband|gas|water|dth|insurance')),
+  MapEntry('EMI', RegExp(r'finance|loan|emi|slice|bajaj|credit|kreditbee|navi')),
+  MapEntry('Medical', RegExp(r'pharma|hospital|medical|clinic|doctor|medic|lab|health')),
+];
+
 String guessCat(String p, bool debit) {
   final l = p.toLowerCase();
   if (!debit) {
     return l.contains('salary') ? 'Salary' : l.contains('refund') ? 'Refund' : l.contains('cashback') ? 'Cashback' : 'Other income';
   }
-  if (RegExp(r'swiggy|zomato|restaurant|cafe|hotel|dominos|pizza|food|bakery|tea|juice').hasMatch(l)) return 'Food';
-  if (RegExp(r'grocer|kirana|mart|store|general|vegetable|milk|dairy|bigbasket|blinkit|zepto').hasMatch(l)) return 'Grocery';
-  if (RegExp(r'uber|ola|irctc|fuel|petrol|diesel|metro|bus|railway|travel|redbus|rapido').hasMatch(l)) return 'Travel';
-  if (RegExp(r'amazon|flipkart|myntra|meesho|ajio|shop|fashion|mall').hasMatch(l)) return 'Shopping';
-  if (RegExp(r'jio|airtel|vodafone|electric|bill|recharge|broadband|gas|water|dth|insurance').hasMatch(l)) return 'Bills';
-  if (RegExp(r'finance|loan|emi|slice|bajaj|credit|kreditbee|navi').hasMatch(l)) return 'EMI';
-  if (RegExp(r'pharma|hospital|medical|clinic|doctor|medic|lab|health').hasMatch(l)) return 'Medical';
+  for (final e in _catRes) {
+    if (e.value.hasMatch(l)) return e.key;
+  }
   return 'Other';
 }
 
@@ -63,21 +71,37 @@ const _banks = {
   'federal': 'Federal Bank'
 };
 
+final _amtRe = RegExp(r'(?:rs\.?|inr|\u20B9)\s*([\d,]+(?:\.\d+)?)', caseSensitive: false);
+final _dmRe = RegExp(r'\b(?:debited|spent|paid|sent|withdrawn|purchase|transferred|debit)\b');
+final _cmRe = RegExp(r'\b(?:credited|received|deposited|refund|salary)\b');
+final _acc1Re = RegExp(r'(?:a/c|acct|account|card)\s*(?:no\.?|number|ending|ending with)?\s*[:\-]?\s*[xX*]*\s*(\d{4})\b',
+    caseSensitive: false);
+final _acc2Re = RegExp(r'[xX*]{2,}(\d{4})');
+final _refRe = RegExp(r'(?:upi\s*ref(?:erence)?|ref(?:erence)?\s*(?:no|number)?|utr|rrn)\s*[:.\-]?\s*(\d{6,})',
+    caseSensitive: false);
+final _pmDebRe = RegExp(
+    r'(?:\bto\b|\bat\b|vpa)\s+([A-Za-z0-9@._\- ]{3,35}?)(?=\s+(?:on|ref|upi|via|dated|avl|bal|utr|if)\b|[.,;(]|$)',
+    caseSensitive: false);
+final _pmCreRe = RegExp(
+    r'(?:\bfrom\b|\bby\b|vpa)\s+([A-Za-z0-9@._\- ]{3,35}?)(?=\s+(?:on|ref|upi|via|dated|avl|bal|utr|if)\b|[.,;(]|$)',
+    caseSensitive: false);
+final _balRe = RegExp(
+    r'(?:avl\.?\s*bal(?:ance)?|available\s*bal(?:ance)?|bal(?:ance)?)\s*(?:is|:)?\s*(?:rs\.?|inr|\u20B9)\s*([\d,]+(?:\.\d+)?)',
+    caseSensitive: false);
+final _badNameRe = RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false);
+
 Tx? parse(String b, int ms, String sender) {
   if (b.isEmpty || _skip.hasMatch(b)) return null;
   final low = b.toLowerCase();
-  final a = RegExp(r'(?:rs\.?|inr|\u20B9)\s*([\d,]+(?:\.\d+)?)', caseSensitive: false).firstMatch(b);
+  final a = _amtRe.firstMatch(b);
   if (a == null) return null;
   final amt = double.tryParse(a.group(1)!.replaceAll(',', ''));
   if (amt == null || amt <= 0) return null;
-  final dm = RegExp(r'\b(?:debited|spent|paid|sent|withdrawn|purchase|transferred|debit)\b').firstMatch(low);
-  final cm = RegExp(r'\b(?:credited|received|deposited|refund|salary)\b').firstMatch(low);
+  final dm = _dmRe.firstMatch(low);
+  final cm = _cmRe.firstMatch(low);
   if (dm == null && cm == null) return null;
   final debit = dm != null && (cm == null || dm.start < cm.start);
-  final am = RegExp(r'(?:a/c|acct|account|card)\s*(?:no\.?|number|ending|ending with)?\s*[:\-]?\s*[xX*]*\s*(\d{4})\b',
-              caseSensitive: false)
-          .firstMatch(b) ??
-      RegExp(r'[xX*]{2,}(\d{4})').firstMatch(b);
+  final am = _acc1Re.firstMatch(b) ?? _acc2Re.firstMatch(b);
   final acc = am != null ? 'XX${am.group(1)}' : 'Unknown';
   var bank = 'Unknown';
   final hay = '$low ${sender.toLowerCase()}';
@@ -100,27 +124,27 @@ Tx? parse(String b, int ms, String sender) {
                       : low.contains('card')
                           ? 'Card'
                           : 'Other';
-  final rm = RegExp(r'(?:upi\s*ref(?:erence)?|ref(?:erence)?\s*(?:no|number)?|utr|rrn)\s*[:.\-]?\s*(\d{6,})',
-          caseSensitive: false)
-      .firstMatch(b);
-  final ref = rm?.group(1) ?? '';
-  final pm = RegExp(
-          debit
-              ? r'(?:\bto\b|\bat\b|vpa)\s+([A-Za-z0-9@._\- ]{3,35}?)(?=\s+(?:on|ref|upi|via|dated|avl|bal|utr|if)\b|[.,;(]|$)'
-              : r'(?:\bfrom\b|\bby\b|vpa)\s+([A-Za-z0-9@._\- ]{3,35}?)(?=\s+(?:on|ref|upi|via|dated|avl|bal|utr|if)\b|[.,;(]|$)',
-          caseSensitive: false)
-      .firstMatch(b);
+  final ref = _refRe.firstMatch(b)?.group(1) ?? '';
+  final pm = (debit ? _pmDebRe : _pmCreRe).firstMatch(b);
   final party = (pm?.group(1) ?? '-').trim();
   final id = ref.isNotEmpty ? 'r${ref}_${debit ? 'd' : 'c'}' : '${ms}_${amt}_${debit}_$acc';
-  final bm = RegExp(r'(?:avl\.?\s*bal(?:ance)?|available\s*bal(?:ance)?|bal(?:ance)?)\s*(?:is|:)?\s*(?:rs\.?|inr|\u20B9)\s*([\d,]+(?:\.\d+)?)',
-          caseSensitive: false)
-      .firstMatch(b);
+  final bm = _balRe.firstMatch(b);
   final p = party.isEmpty ? '-' : party;
   final kind = debit ? (method == 'ATM' ? 'transfer' : 'expense') : 'income';
   return Tx(id, DateTime.fromMillisecondsSinceEpoch(ms), amt, debit, acc, bank, method, p, ref,
       kind: kind,
       cat: kind == 'transfer' ? 'Transfer' : guessCat(p, debit),
       bal: bm == null ? null : double.tryParse(bm.group(1)!.replaceAll(',', '')));
+}
+
+// Background isolate me chalega (UI freeze nahi hoga)
+List<Tx> parseAll(List<List<Object>> raw) {
+  final out = <Tx>[];
+  for (final r in raw) {
+    final x = parse(r[0] as String, r[1] as int, r[2] as String);
+    if (x != null) out.add(x);
+  }
+  return out;
 }
 
 String two(int n) => n.toString().padLeft(2, '0');
@@ -169,11 +193,25 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   SharedPreferences? sp;
   final qc = TextEditingController();
 
+  bool refreshing = false;
+  Timer? _deb;
+  List<Tx>? _allC;
+  int _allK = 0;
+  List<Tx>? _dupFor;
+  int _dupOkLen = -1;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     boot();
+  }
+
+  @override
+  void dispose() {
+    _deb?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> boot() async {
@@ -210,17 +248,21 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Future<void> load() async {
     final t = Telephony.instance;
     if (await t.requestSmsPermissions != true) {
-      setState(() => status = 'SMS permission nahi mili. Allow karke refresh dabao.');
+      if (mounted) setState(() => status = 'SMS permission nahi mili. Allow karke refresh dabao.');
       return;
     }
     final inbox = await t.getInboxSms(
         columns: [SmsColumn.BODY, SmsColumn.DATE, SmsColumn.ADDRESS],
         sortOrder: [OrderBy(SmsColumn.DATE, sort: Sort.DESC)]);
+    final raw = <List<Object>>[
+      for (final m in inbox) [m.body ?? '', m.date ?? 0, m.address ?? '']
+    ];
+    // heavy parsing background me
+    final parsed = await compute(parseAll, raw);
     final list = <Tx>[];
     final ids = <String>{};
-    for (final m in inbox) {
-      final x = parse(m.body ?? '', m.date ?? 0, m.address ?? '');
-      if (x != null && ids.add(x.id)) {
+    for (final x in parsed) {
+      if (ids.add(x.id)) {
         applyMeta(x);
         list.add(x);
       }
@@ -236,6 +278,18 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     if (!listening) {
       listening = true;
       t.listenIncomingSms(onNewMessage: onSms, listenInBackground: false);
+    }
+  }
+
+  Future<void> refresh() async {
+    if (refreshing) return;
+    setState(() => refreshing = true);
+    try {
+      await load();
+      await syncEmail();
+      if (mounted) snack('Refresh ho gaya');
+    } finally {
+      if (mounted) setState(() => refreshing = false);
     }
   }
 
@@ -415,7 +469,6 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Set<String> dupOk = {}, dupSet = {};
   String? pin;
   bool hideBal = false, lockShown = false;
-  int dupKey = -1;
   final recF = const [['name', 'Naam (Rent, Netflix...)', 't'], ['amt', 'Amount', 'n'], ['day', 'Mahine ki tareekh (1-31)', 'n']];
   final loanF = const [['name', 'Loan naam', 't'], ['emi', 'EMI amount', 'n'], ['day', 'EMI tareekh (1-31)', 'n'], ['months', 'Total mahine', 'n'], ['paid', 'Ab tak kitne EMI bhare', 'n']];
   final goalF = const [['name', 'Goal naam', 't'], ['target', 'Target amount', 'n'], ['saved', 'Ab tak jama', 'n']];
@@ -434,11 +487,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   }
 
   bool isDup(Tx t) {
-    final k = mails.length * 13 + sms.length * 100003 + manual.length * 101 + hidden.length * 7 + dupOk.length;
-    if (k != dupKey) {
-      dupKey = k;
+    final cur = all;
+    if (!identical(cur, _dupFor) || _dupOkLen != dupOk.length) {
+      _dupFor = cur;
+      _dupOkLen = dupOk.length;
       final g = <String, List<Tx>>{};
-      for (final x in all) {
+      for (final x in cur) {
         (g['${x.party.toLowerCase()}|${x.amt}|${x.acc}|${x.debit}'] ??= []).add(x);
       }
       dupSet = {};
@@ -905,8 +959,6 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   DateTime startD = DateTime(2000);
   bool emBusy = false;
   String emStatus = '';
-  bool busy = false;
-  DateTime emStart = DateTime(2000);
 
   bool near(Tx a, Tx b) =>
       a.amt == b.amt &&
@@ -949,16 +1001,14 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
 
   Future<void> syncEmail() async {
     final addr = sp?.getString('eAddr'), pass = sp?.getString('ePass');
-    if (addr == null || pass == null) return;
-    if (emBusy && DateTime.now().difference(emStart).inSeconds < 100) return;
+    if (addr == null || pass == null || emBusy) return;
     emBusy = true;
-    emStart = DateTime.now();
     final client = mail.ImapClient(isLogEnabled: false);
     try {
-      await client.connectToServer('imap.gmail.com', 993, isSecure: true).timeout(const Duration(seconds: 25));
-      await client.login(addr, pass).timeout(const Duration(seconds: 25));
+      await client.connectToServer('imap.gmail.com', 993, isSecure: true);
+      await client.login(addr, pass);
       await client.selectInbox();
-      final r = await client.fetchRecentMessages(messageCount: 100, criteria: 'BODY.PEEK[]').timeout(const Duration(seconds: 90));
+      final r = await client.fetchRecentMessages(messageCount: 150, criteria: 'BODY.PEEK[]');
       final out = <Tx>[];
       final ids = <String>{};
       for (final m in r.messages) {
@@ -993,7 +1043,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       });
       rev.value++;
     } catch (e) {
-      snack('Email sync fail: $e');
+      if (mounted) snack('Email sync fail: $e');
     } finally {
       emBusy = false;
     }
@@ -1071,24 +1121,18 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     ];
   }
 
-  Future<void> doRefresh() async {
-    if (busy) return;
-    setState(() => busy = true);
-    snack('Refresh ho raha hai...');
-    try {
-      await load();
-      await syncEmail();
-    } catch (e) {
-      snack('Refresh me dikkat: $e');
+  List<Tx> get all {
+    final k = Object.hash(identityHashCode(sms), sms.length, identityHashCode(mails), mails.length,
+        identityHashCode(manual), manual.length, identityHashCode(hidden), hidden.length, startD);
+    if (_allC == null || k != _allK) {
+      _allK = k;
+      _allC = [...sms, ...mails, ...manual].where((t) => !hidden.contains(t.id) && !t.d.isBefore(startD)).toList();
     }
-    if (!mounted) return;
-    setState(() => busy = false);
-    final a = all;
-    snack('Refresh ho gaya \u2022 SMS ${a.where((t) => !t.manual && t.src == 'sms').length} \u2022 Email ${a.where((t) => t.src == 'email').length}');
+    return _allC!;
   }
 
-  List<Tx> get all => [...sms, ...mails, ...manual].where((t) => !hidden.contains(t.id) && !t.d.isBefore(startD)).toList();
-  String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
+  String nm(Tx t) =>
+      names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || _badNameRe.hasMatch(t.party) ? 'Unknown recipient' : t.party);
 
   String dayLabel(DateTime d) {
     final n = DateTime.now();
@@ -1104,12 +1148,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         : range == '15'
             ? now.subtract(const Duration(days: 15))
             : range == '7'
-        ? now.subtract(const Duration(days: 7))
-        : range == '30'
-            ? now.subtract(const Duration(days: 30))
-            : range == 'm'
-                ? DateTime(now.year, now.month)
-                : null;
+                ? now.subtract(const Duration(days: 7))
+                : range == '30'
+                    ? now.subtract(const Duration(days: 30))
+                    : range == 'm'
+                        ? DateTime(now.year, now.month)
+                        : null;
     final s = q.trim().toLowerCase();
     final out = all.where((t) {
       if (type == 'exp' && t.kind != 'expense') return false;
@@ -1148,10 +1192,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           if (sub != null) Text(sub, style: TextStyle(color: cs.onSurfaceVariant)),
         ])),
         IconButton(
-            icon: busy
+            icon: refreshing
                 ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.refresh),
-            onPressed: doRefresh),
+            onPressed: refreshing ? null : refresh),
       ]));
 
   Widget stat(String label, String value, Color c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1315,10 +1359,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     if (v == 'c') {
       final now = DateTime.now();
       final r = await showDateRangePicker(context: context, firstDate: DateTime(2015), lastDate: now);
-      if (r != null) setState(() {
-        cr = r;
-        range = 'c';
-      });
+      if (r != null) {
+        setState(() {
+          cr = r;
+          range = 'c';
+        });
+      }
     } else {
       setState(() => range = v);
     }
@@ -1358,7 +1404,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       head('Transactions'),
       TextField(
         controller: qc,
-        onChanged: (v) => setState(() => q = v),
+        onChanged: (v) {
+          _deb?.cancel();
+          _deb = Timer(const Duration(milliseconds: 300), () {
+            if (mounted) setState(() => q = v);
+          });
+        },
         decoration: InputDecoration(
             filled: true,
             fillColor: cs.surfaceContainerHigh,
@@ -1370,6 +1421,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
                 : IconButton(
                     icon: const Icon(Icons.clear),
                     onPressed: () {
+                      _deb?.cancel();
                       qc.clear();
                       setState(() => q = '');
                     })),
