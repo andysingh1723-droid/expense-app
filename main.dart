@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:another_telephony/telephony.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -149,7 +150,7 @@ class Home extends StatefulWidget {
   State<Home> createState() => _HomeState();
 }
 
-class _HomeState extends State<Home> {
+class _HomeState extends State<Home> with WidgetsBindingObserver {
   List<Tx> sms = [], manual = [];
   final seen = <String>{};
   Map<String, String> names = {}, alias = {};
@@ -170,6 +171,7 @@ class _HomeState extends State<Home> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     boot();
   }
 
@@ -186,6 +188,9 @@ class _HomeState extends State<Home> {
     loans = ld('loans');
     goals = ld('goals');
     dupOk = (sp!.getStringList('dupok') ?? <String>[]).toSet();
+    pin = sp!.getString('pin');
+    hideBal = sp!.getBool('hide') ?? false;
+    WidgetsBinding.instance.addPostFrameCallback((_) => showLock());
     manual = (jsonDecode(sp!.getString('manual') ?? '[]') as List)
         .map((e) => Tx.fromJson(Map<String, dynamic>.from(e)))
         .toList();
@@ -280,10 +285,10 @@ class _HomeState extends State<Home> {
               Icon(e.key == 'Cash' ? Icons.payments_outlined : Icons.account_balance_outlined, size: 20),
               const SizedBox(width: 10),
               Expanded(child: Text(e.key)),
-              Text(sm(e.value), style: bold),
+              Text(hideBal ? '\u2022\u2022\u2022\u2022' : sm(e.value), style: bold),
             ])),
       const Divider(),
-      Row(children: [const Expanded(child: Text('Total', style: bold)), Text(sm(total), style: bold)]),
+      Row(children: [const Expanded(child: Text('Total', style: bold)), Text(hideBal ? '\u2022\u2022\u2022\u2022' : sm(total), style: bold)]),
       const SizedBox(height: 4),
       Text('Bank balance SMS ke "Avl Bal" se aata hai', style: sub),
     ]));
@@ -395,6 +400,8 @@ class _HomeState extends State<Home> {
 
   List<Map<String, dynamic>> rec = [], loans = [], goals = [];
   Set<String> dupOk = {}, dupSet = {};
+  String? pin;
+  bool hideBal = false, lockShown = false;
   int dupKey = -1;
   final recF = const [['name', 'Naam (Rent, Netflix...)', 't'], ['amt', 'Amount', 'n'], ['day', 'Mahine ki tareekh (1-31)', 'n']];
   final loanF = const [['name', 'Loan naam', 't'], ['emi', 'EMI amount', 'n'], ['day', 'EMI tareekh (1-31)', 'n'], ['months', 'Total mahine', 'n'], ['paid', 'Ab tak kitne EMI bhare', 'n']];
@@ -500,7 +507,8 @@ class _HomeState extends State<Home> {
                 for (final x in f)
                   TextField(
                       controller: c[x[0]],
-                      keyboardType: x[2] == 'n' ? TextInputType.number : TextInputType.text,
+                      keyboardType: x[2] == 'n' || x[2] == 'p' ? TextInputType.number : TextInputType.text,
+                      obscureText: x[2] == 'p',
                       decoration: InputDecoration(labelText: x[1]))
               ])),
               actions: [
@@ -527,7 +535,7 @@ class _HomeState extends State<Home> {
     saveLists();
   }
 
-  void openPage(String title, List<Widget> Function() body, VoidCallback onAdd) {
+  void openPage(String title, List<Widget> Function() body, VoidCallback? onAdd) {
     Navigator.push(
         context,
         MaterialPageRoute(
@@ -535,8 +543,9 @@ class _HomeState extends State<Home> {
                 valueListenable: rev,
                 builder: (ctx, _, __) => Scaffold(
                       appBar: AppBar(title: Text(title)),
-                      floatingActionButton:
-                          FloatingActionButton.extended(onPressed: onAdd, icon: const Icon(Icons.add), label: const Text('Add')),
+                      floatingActionButton: onAdd == null
+                          ? null
+                          : FloatingActionButton.extended(onPressed: onAdd, icon: const Icon(Icons.add), label: const Text('Add')),
                       body: ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 96), children: body()),
                     ))));
   }
@@ -689,8 +698,186 @@ class _HomeState extends State<Home> {
       moreTile(Icons.repeat, 'Recurring Payments', '${rec.length} payments', () => openPage('Recurring Payments', recBody, () => editItem(rec, null, 'Recurring payment', recF))),
       moreTile(Icons.account_balance, 'EMI / Loans', 'Monthly EMI ${money(monthly)}', () => openPage('EMI / Loans', loanBody, () => editItem(loans, null, 'EMI / Loan', loanF))),
       moreTile(Icons.savings_outlined, 'Savings Goals', '${goals.length} goals', () => openPage('Savings Goals', goalBody, () => editItem(goals, null, 'Savings goal', goalF))),
+      moreTile(Icons.settings_outlined, 'Settings', 'App lock, backup, export', () => openPage('Settings', settingsBody, null)),
     ]);
   }
+
+  String hp(String s) {
+    var h = 5381;
+    for (final c in 'mk$s'.codeUnits) {
+      h = ((h * 33) ^ c) & 0x7fffffff;
+    }
+    return h.toString();
+  }
+
+  void snack(String s) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    if (s == AppLifecycleState.paused && pin != null) showLock();
+  }
+
+  void showLock() {
+    if (lockShown || pin == null || !mounted) return;
+    lockShown = true;
+    Navigator.of(context)
+        .push(MaterialPageRoute(
+            fullscreenDialog: true, builder: (_) => PopScope(canPop: false, child: LockScreen((v) => hp(v) == pin))))
+        .then((_) => lockShown = false);
+  }
+
+  Future<void> setPin() async {
+    final r = await ask('PIN set karo', [['a', 'Naya PIN (4-6 digit)', 'p'], ['b', 'PIN dobara', 'p']]);
+    if (r == null) return;
+    if (!RegExp(r'^\d{4,6}$').hasMatch(r['a']!) || r['a'] != r['b']) {
+      snack('PIN 4-6 digit ka ho aur dono baar same ho');
+      return;
+    }
+    pin = hp(r['a']!);
+    sp?.setString('pin', pin!);
+    setState(() {});
+    rev.value++;
+    snack('App lock on ho gaya');
+  }
+
+  Future<void> changePin() async {
+    final r = await ask('PIN badlo', [['o', 'Purana PIN', 'p'], ['a', 'Naya PIN (4-6 digit)', 'p'], ['b', 'Naya PIN dobara', 'p']]);
+    if (r == null) return;
+    if (hp(r['o']!) != pin) {
+      snack('Purana PIN galat hai');
+    } else if (!RegExp(r'^\d{4,6}$').hasMatch(r['a']!) || r['a'] != r['b']) {
+      snack('Naya PIN 4-6 digit ka ho aur dono baar same ho');
+    } else {
+      pin = hp(r['a']!);
+      sp?.setString('pin', pin!);
+      snack('PIN badal gaya');
+    }
+  }
+
+  Future<void> removePin() async {
+    final r = await ask('Current PIN', [['a', 'PIN', 'p']]);
+    if (r == null) return;
+    if (hp(r['a']!) == pin) {
+      pin = null;
+      sp?.remove('pin');
+      setState(() {});
+      rev.value++;
+      snack('App lock band ho gaya');
+    } else {
+      snack('Galat PIN');
+    }
+  }
+
+  Future<void> backup() async {
+    final j = {
+      'v': 1, 'budget': budget, 'manual': manual.map((e) => e.toJson()).toList(), 'names': names, 'alias': alias,
+      'hidden': hidden.toList(), 'meta': meta, 'cb': cb, 'rec': rec, 'loans': loans, 'goals': goals, 'dupok': dupOk.toList()
+    };
+    await Clipboard.setData(ClipboardData(text: jsonEncode(j)));
+    snack('Backup copy ho gaya. Ab Notes ya WhatsApp me paste karke save karo');
+  }
+
+  Future<void> restore(String txt) async {
+    try {
+      final j = jsonDecode(txt) as Map<String, dynamic>;
+      if (j['v'] != 1) throw 'bad';
+      List<Map<String, dynamic>> lm(String k) => (j[k] as List).map((e) => Map<String, dynamic>.from(e)).toList();
+      setState(() {
+        budget = (j['budget'] as num).toDouble();
+        manual = (j['manual'] as List).map((e) => Tx.fromJson(Map<String, dynamic>.from(e))).toList();
+        names = Map<String, String>.from(j['names']);
+        alias = Map<String, String>.from(j['alias']);
+        hidden = (j['hidden'] as List).map((e) => '$e').toSet();
+        dupOk = (j['dupok'] as List).map((e) => '$e').toSet();
+        meta = (j['meta'] as Map).map<String, Map<String, String>>((k, v) => MapEntry(k.toString(), Map<String, String>.from(v as Map)));
+        cb = (j['cb'] as Map).map<String, double>((k, v) => MapEntry(k.toString(), (v as num).toDouble()));
+        rec = lm('rec');
+        loans = lm('loans');
+        goals = lm('goals');
+      });
+      sp?.setDouble('budget', budget);
+      sp?.setStringList('hidden', hidden.toList());
+      sp?.setStringList('dupok', dupOk.toList());
+      sp?.setString('meta', jsonEncode(meta));
+      sp?.setString('cb', jsonEncode(cb));
+      saveManual();
+      saveNames();
+      saveLists();
+      await load();
+      snack('Restore ho gaya');
+    } catch (_) {
+      snack('Backup text sahi nahi hai');
+    }
+  }
+
+  void restoreDialog() {
+    final c = TextEditingController();
+    showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              title: const Text('Restore backup'),
+              content: SingleChildScrollView(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Text('Dhyan: maujooda manual data, naam, budget, goals sab replace ho jayenge.', style: sub),
+                TextField(controller: c, maxLines: 5, decoration: const InputDecoration(hintText: 'Backup text yahan paste karo')),
+                TextButton.icon(
+                    onPressed: () async {
+                      final d = await Clipboard.getData('text/plain');
+                      c.text = d?.text ?? '';
+                    },
+                    icon: const Icon(Icons.paste),
+                    label: const Text('Clipboard se paste')),
+              ])),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      restore(c.text.trim());
+                    },
+                    child: const Text('Restore'))
+              ],
+            ));
+  }
+
+  Future<void> exportCsv() async {
+    String q(String s) => '"${s.replaceAll('"', '""')}"';
+    final l = all.toList()..sort((a, b) => b.d.compareTo(a.d));
+    final b = StringBuffer('Date,Time,Type,Category,Name,Amount,Direction,Bank,Account,Method,Reference\n');
+    for (final t in l) {
+      b.writeln([
+        '${t.d.year}-${two(t.d.month)}-${two(t.d.day)}', tm(t.d), t.kind, t.cat, q(nm(t)), t.amt.toStringAsFixed(2),
+        t.debit ? 'Debit' : 'Credit', q(t.bank), t.acc, t.method, t.ref
+      ].join(','));
+    }
+    await Clipboard.setData(ClipboardData(text: b.toString()));
+    snack('${l.length} transactions ka CSV copy ho gaya. Google Sheets/Excel me paste karo');
+  }
+
+  List<Widget> settingsBody() => [
+        gap8(card(SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Hide balances'),
+            subtitle: Text('Home par balance aur accounts chhupao', style: sub),
+            value: hideBal,
+            onChanged: (v) {
+              hideBal = v;
+              sp?.setBool('hide', v);
+              setState(() {});
+              rev.value++;
+            }))),
+        if (pin == null)
+          moreTile(Icons.lock_outline, 'App Lock (PIN)', 'Off \u2022 PIN lagao', setPin)
+        else ...[
+          moreTile(Icons.lock, 'PIN badlo', 'App Lock on hai', changePin),
+          moreTile(Icons.lock_open, 'PIN hatao', 'App Lock band karo', removePin),
+        ],
+        moreTile(Icons.backup_outlined, 'Backup', 'Poora data copy hoga, Notes/WhatsApp me save karo', backup),
+        moreTile(Icons.restore, 'Restore', 'Backup text paste karke wapas lao', restoreDialog),
+        moreTile(Icons.table_chart_outlined, 'Export CSV', 'Sheets/Excel me paste karne ke liye', exportCsv),
+        moreTile(Icons.info_outline, 'About', 'Mera Kharcha \u2022 data sirf is phone me rehta hai', () {}),
+      ];
 
   List<Tx> get all => [...sms, ...manual].where((t) => !hidden.contains(t.id)).toList();
   String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
@@ -887,7 +1074,7 @@ class _HomeState extends State<Home> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('${mon[n.month - 1]} balance', style: TextStyle(color: cs.onPrimaryContainer)),
           const SizedBox(height: 6),
-          Text('${bal < 0 ? '-' : ''}${money(bal.abs())}',
+          Text(hideBal ? '\u2022\u2022\u2022\u2022' : '${bal < 0 ? '-' : ''}${money(bal.abs())}',
               style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: cs.onPrimaryContainer)),
           const SizedBox(height: 16),
           Row(children: [
@@ -1493,5 +1680,52 @@ class _HomeState extends State<Home> {
                     child: const Text('Save'))
               ],
             ));
+  }
+}
+
+class LockScreen extends StatefulWidget {
+  final bool Function(String) check;
+  const LockScreen(this.check, {super.key});
+  @override
+  State<LockScreen> createState() => _LockState();
+}
+
+class _LockState extends State<LockScreen> {
+  final c = TextEditingController();
+  bool bad = false;
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+        body: SafeArea(
+            child: Center(
+                child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.lock, size: 56),
+                      const SizedBox(height: 16),
+                      const Text('Mera Kharcha', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 8),
+                      const Text('PIN daalo'),
+                      const SizedBox(height: 16),
+                      TextField(
+                          controller: c,
+                          autofocus: true,
+                          obscureText: true,
+                          keyboardType: TextInputType.number,
+                          textAlign: TextAlign.center,
+                          maxLength: 6,
+                          style: const TextStyle(fontSize: 24, letterSpacing: 8),
+                          decoration: InputDecoration(counterText: '', errorText: bad ? 'Galat PIN' : null),
+                          onChanged: (v) {
+                            if (v.length >= 4 && widget.check(v)) {
+                              Navigator.pop(context);
+                            } else if (v.length >= 6) {
+                              c.clear();
+                              setState(() => bad = true);
+                            } else if (bad) {
+                              setState(() => bad = false);
+                            }
+                          }),
+                    ])))));
   }
 }
