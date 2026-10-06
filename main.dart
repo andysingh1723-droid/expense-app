@@ -13,19 +13,42 @@ void main() => runApp(MaterialApp(
     darkTheme: ThemeData(colorSchemeSeed: Colors.indigo, brightness: Brightness.dark, useMaterial3: true),
     home: const Home()));
 
+const expCats = ['Food', 'Grocery', 'Travel', 'Shopping', 'Bills', 'EMI', 'Medical', 'Other'];
+const incCats = ['Salary', 'Cashback', 'Refund', 'Other income'];
+List<String> catsFor(String k) => k == 'income' ? incCats : k == 'expense' ? expCats : const ['Transfer'];
+String sm(double v) => '${v < 0 ? '-' : ''}${money(v.abs())}';
+
+String guessCat(String p, bool debit) {
+  final l = p.toLowerCase();
+  if (!debit) {
+    return l.contains('salary') ? 'Salary' : l.contains('refund') ? 'Refund' : l.contains('cashback') ? 'Cashback' : 'Other income';
+  }
+  if (RegExp(r'swiggy|zomato|restaurant|cafe|hotel|dominos|pizza|food|bakery|tea|juice').hasMatch(l)) return 'Food';
+  if (RegExp(r'grocer|kirana|mart|store|general|vegetable|milk|dairy|bigbasket|blinkit|zepto').hasMatch(l)) return 'Grocery';
+  if (RegExp(r'uber|ola|irctc|fuel|petrol|diesel|metro|bus|railway|travel|redbus|rapido').hasMatch(l)) return 'Travel';
+  if (RegExp(r'amazon|flipkart|myntra|meesho|ajio|shop|fashion|mall').hasMatch(l)) return 'Shopping';
+  if (RegExp(r'jio|airtel|vodafone|electric|bill|recharge|broadband|gas|water|dth|insurance').hasMatch(l)) return 'Bills';
+  if (RegExp(r'finance|loan|emi|slice|bajaj|credit|kreditbee|navi').hasMatch(l)) return 'EMI';
+  if (RegExp(r'pharma|hospital|medical|clinic|doctor|medic|lab|health').hasMatch(l)) return 'Medical';
+  return 'Other';
+}
+
 class Tx {
   final String id, acc, bank, method, party, ref;
   final DateTime d;
   final double amt;
   final bool debit, manual;
+  String kind, cat;
+  double? bal;
   Tx(this.id, this.d, this.amt, this.debit, this.acc, this.bank, this.method, this.party, this.ref,
-      {this.manual = false});
+      {this.manual = false, this.kind = 'expense', this.cat = 'Other', this.bal});
   Map<String, dynamic> toJson() => {
         'id': id, 'd': d.millisecondsSinceEpoch, 'a': amt, 'db': debit,
-        'ac': acc, 'b': bank, 'm': method, 'p': party, 'r': ref
+        'ac': acc, 'b': bank, 'm': method, 'p': party, 'r': ref, 'k': kind, 'c': cat
       };
   factory Tx.fromJson(Map<String, dynamic> j) => Tx(j['id'], DateTime.fromMillisecondsSinceEpoch(j['d']),
-      (j['a'] as num).toDouble(), j['db'], j['ac'], j['b'], j['m'], j['p'], j['r'], manual: true);
+      (j['a'] as num).toDouble(), j['db'], j['ac'], j['b'], j['m'], j['p'], j['r'],
+      manual: true, kind: j['k'] ?? (j['db'] == true ? 'expense' : 'income'), cat: j['c'] ?? 'Other');
 }
 
 final _skip = RegExp(
@@ -87,8 +110,15 @@ Tx? parse(String b, int ms, String sender) {
       .firstMatch(b);
   final party = (pm?.group(1) ?? '-').trim();
   final id = ref.isNotEmpty ? 'r${ref}_${debit ? 'd' : 'c'}' : '${ms}_${amt}_${debit}_$acc';
-  return Tx(id, DateTime.fromMillisecondsSinceEpoch(ms), amt, debit, acc, bank, method,
-      party.isEmpty ? '-' : party, ref);
+  final bm = RegExp(r'(?:avl\.?\s*bal(?:ance)?|available\s*bal(?:ance)?|bal(?:ance)?)\s*(?:is|:)?\s*(?:rs\.?|inr|\u20B9)\s*([\d,]+(?:\.\d+)?)',
+          caseSensitive: false)
+      .firstMatch(b);
+  final p = party.isEmpty ? '-' : party;
+  final kind = debit ? (method == 'ATM' ? 'transfer' : 'expense') : 'income';
+  return Tx(id, DateTime.fromMillisecondsSinceEpoch(ms), amt, debit, acc, bank, method, p, ref,
+      kind: kind,
+      cat: kind == 'transfer' ? 'Transfer' : guessCat(p, debit),
+      bal: bm == null ? null : double.tryParse(bm.group(1)!.replaceAll(',', '')));
 }
 
 String two(int n) => n.toString().padLeft(2, '0');
@@ -110,8 +140,8 @@ String money(double v) {
   return '$rs$b';
 }
 
-double spent(List<Tx> l) => l.where((t) => t.debit).fold<double>(0, (s, t) => s + t.amt);
-double got(List<Tx> l) => l.where((t) => !t.debit).fold<double>(0, (s, t) => s + t.amt);
+double spent(List<Tx> l) => l.where((t) => t.debit && t.kind != 'transfer').fold<double>(0, (s, t) => s + t.amt);
+double got(List<Tx> l) => l.where((t) => !t.debit && t.kind != 'transfer').fold<double>(0, (s, t) => s + t.amt);
 
 class Home extends StatefulWidget {
   const Home({super.key});
@@ -127,6 +157,10 @@ class _HomeState extends State<Home> {
   String status = 'Loading...', q = '', type = 'all', src = 'all', range = 'all', mode = 'tx';
   int rd = 30;
   int tab = 0;
+  Set<String> hidden = {};
+  Map<String, Map<String, String>> meta = {};
+  Map<String, double> cb = {};
+  String catF = 'all';
   DateTimeRange? cr;
   int? pieSel;
   bool listening = false;
@@ -144,6 +178,10 @@ class _HomeState extends State<Home> {
     budget = sp!.getDouble('budget') ?? 10000;
     names = Map<String, String>.from(jsonDecode(sp!.getString('names') ?? '{}'));
     alias = Map<String, String>.from(jsonDecode(sp!.getString('alias') ?? '{}'));
+    hidden = (sp!.getStringList('hidden') ?? <String>[]).toSet();
+    meta = (jsonDecode(sp!.getString('meta') ?? '{}') as Map)
+        .map<String, Map<String, String>>((k, v) => MapEntry(k.toString(), Map<String, String>.from(v as Map)));
+    cb = (jsonDecode(sp!.getString('cb') ?? '{}') as Map).map<String, double>((k, v) => MapEntry(k.toString(), (v as num).toDouble()));
     manual = (jsonDecode(sp!.getString('manual') ?? '[]') as List)
         .map((e) => Tx.fromJson(Map<String, dynamic>.from(e)))
         .toList();
@@ -163,7 +201,10 @@ class _HomeState extends State<Home> {
     final ids = <String>{};
     for (final m in inbox) {
       final x = parse(m.body ?? '', m.date ?? 0, m.address ?? '');
-      if (x != null && ids.add(x.id)) list.add(x);
+      if (x != null && ids.add(x.id)) {
+        applyMeta(x);
+        list.add(x);
+      }
     }
     seen
       ..clear()
@@ -181,7 +222,10 @@ class _HomeState extends State<Home> {
 
   void onSms(SmsMessage m) {
     final x = parse(m.body ?? '', m.date ?? DateTime.now().millisecondsSinceEpoch, m.address ?? '');
-    if (x != null && seen.add(x.id) && mounted) setState(() => sms.insert(0, x));
+    if (x != null && seen.add(x.id) && mounted) {
+      applyMeta(x);
+      setState(() => sms.insert(0, x));
+    }
   }
 
   void saveManual() => sp?.setString('manual', jsonEncode(manual.map((e) => e.toJson()).toList()));
@@ -190,7 +234,162 @@ class _HomeState extends State<Home> {
     sp?.setString('alias', jsonEncode(alias));
   }
 
-  List<Tx> get all => [...sms, ...manual];
+  void applyMeta(Tx t) {
+    final m = meta[t.id];
+    if (m != null) {
+      t.kind = m['k'] ?? t.kind;
+      t.cat = m['c'] ?? t.cat;
+    }
+  }
+
+  Map<String, double> balances() {
+    final out = <String, double>{};
+    final when = <String, DateTime>{};
+    var cash = 0.0;
+    for (final t in all) {
+      if (t.bal != null && t.acc != 'Unknown') {
+        final k = t.bank == 'Unknown' ? t.acc : '${t.bank} ${t.acc}';
+        final p = when[k];
+        if (p == null || t.d.isAfter(p)) {
+          when[k] = t.d;
+          out[k] = t.bal!;
+        }
+      }
+      if (t.manual && t.acc == 'Cash') cash += t.debit ? -t.amt : t.amt;
+      if (!t.manual && t.method == 'ATM' && t.debit && t.kind == 'transfer') cash += t.amt;
+    }
+    out['Cash'] = cash;
+    return out;
+  }
+
+  Widget accountsCard() {
+    final b = balances();
+    final total = b.values.fold<double>(0, (a, v) => a + v);
+    const bold = TextStyle(fontWeight: FontWeight.bold);
+    return card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('Accounts', style: bold),
+      const SizedBox(height: 8),
+      for (final e in b.entries)
+        Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(children: [
+              Icon(e.key == 'Cash' ? Icons.payments_outlined : Icons.account_balance_outlined, size: 20),
+              const SizedBox(width: 10),
+              Expanded(child: Text(e.key)),
+              Text(sm(e.value), style: bold),
+            ])),
+      const Divider(),
+      Row(children: [const Expanded(child: Text('Total', style: bold)), Text(sm(total), style: bold)]),
+      const SizedBox(height: 4),
+      Text('Bank balance SMS ke "Avl Bal" se aata hai', style: sub),
+    ]));
+  }
+
+  void editMeta(Tx t) {
+    var kind = t.kind, cat = t.cat;
+    showDialog(
+        context: context,
+        builder: (_) => StatefulBuilder(builder: (ctx, ss) {
+              final opts = catsFor(kind);
+              if (!opts.contains(cat)) cat = opts.first;
+              return AlertDialog(
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+                title: const Text('Type & category'),
+                content: SingleChildScrollView(
+                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Wrap(spacing: 8, children: [
+                    for (final k in const ['expense', 'income', 'transfer'])
+                      ChoiceChip(
+                          label: Text(k[0].toUpperCase() + k.substring(1)),
+                          selected: kind == k,
+                          onSelected: (_) => ss(() => kind = k))
+                  ]),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                      value: cat,
+                      decoration: const InputDecoration(labelText: 'Category'),
+                      items: [for (final c in opts) DropdownMenuItem(value: c, child: Text(c))],
+                      onChanged: (v) => ss(() => cat = v ?? cat)),
+                ])),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                  FilledButton(
+                      onPressed: () {
+                        setState(() {
+                          t.kind = kind;
+                          t.cat = cat;
+                        });
+                        if (t.manual) {
+                          saveManual();
+                        } else {
+                          meta[t.id] = {'k': kind, 'c': cat};
+                          sp?.setString('meta', jsonEncode(meta));
+                        }
+                        rev.value++;
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text('Save'))
+                ],
+              );
+            }));
+  }
+
+  void setCatBudget(String c) {
+    final ctl = TextEditingController(text: (cb[c] ?? 0) > 0 ? cb[c]!.toStringAsFixed(0) : '');
+    showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              title: Text('$c budget'),
+              content: TextField(controller: ctl, keyboardType: TextInputType.number, decoration: const InputDecoration(prefixText: rs)),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () {
+                      final v = double.tryParse(ctl.text) ?? 0;
+                      setState(() => v > 0 ? cb[c] = v : cb.remove(c));
+                      sp?.setString('cb', jsonEncode(cb));
+                      Navigator.pop(ctx);
+                    },
+                    child: const Text('Save'))
+              ],
+            ));
+  }
+
+  Widget catBudgetCard(String c, double sp) {
+    final lim = cb[c] ?? 0;
+    final p = lim > 0 ? sp / lim : 0.0;
+    final col = p >= 1 ? rc : p >= 0.9 ? Colors.deepOrange : p >= 0.8 ? Colors.amber : gc;
+    final msg = lim <= 0
+        ? 'Limit set nahi (tap karke set karo)'
+        : p >= 1
+            ? 'Budget exceeded'
+            : p >= 0.9
+                ? '90% reach ho gaya'
+                : p >= 0.8
+                    ? '80% reach ho gaya'
+                    : '${(p * 100).round()}% use hua';
+    return Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: card(
+            onTap: () => setCatBudget(c),
+            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Expanded(child: Text(c, style: const TextStyle(fontWeight: FontWeight.bold))),
+                Text('${money(sp)} / ${lim > 0 ? money(lim) : '-'}'),
+              ]),
+              if (lim > 0) ...[
+                const SizedBox(height: 8),
+                ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: LinearProgressIndicator(value: p.clamp(0.0, 1.0).toDouble(), minHeight: 8, color: col)),
+              ],
+              const SizedBox(height: 4),
+              Text(msg, style: TextStyle(fontSize: 12, color: lim > 0 ? col : cs.onSurfaceVariant)),
+            ])));
+  }
+
+  List<Tx> get all => [...sms, ...manual].where((t) => !hidden.contains(t.id)).toList();
   String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
 
   String dayLabel(DateTime d) {
@@ -215,14 +414,16 @@ class _HomeState extends State<Home> {
                 : null;
     final s = q.trim().toLowerCase();
     final out = all.where((t) {
-      if (type == 'exp' && !t.debit) return false;
-      if (type == 'inc' && t.debit) return false;
+      if (type == 'exp' && t.kind != 'expense') return false;
+      if (type == 'inc' && t.kind != 'income') return false;
+      if (type == 'trf' && t.kind != 'transfer') return false;
+      if (catF != 'all' && t.cat != catF) return false;
       if (src != 'all' && t.bank != src && t.acc != src) return false;
       if (from != null && t.d.isBefore(from)) return false;
       if (range == 'c' && cr != null && !t.d.isBefore(cr!.end.add(const Duration(days: 1)))) return false;
       if (s.isEmpty) return true;
       final hay =
-          '${nm(t)} ${t.party} ${t.bank} ${t.acc} ${t.method} ${t.ref} ${t.amt} ${t.amt.round()} ${t.debit ? 'debit expense sent' : 'credit income received'}'
+          '${nm(t)} ${t.party} ${t.bank} ${t.acc} ${t.method} ${t.ref} ${t.amt} ${t.amt.round()} ${t.kind} ${t.cat} ${t.debit ? 'debit expense sent' : 'credit income received'}'
               .toLowerCase();
       return hay.contains(s);
     }).toList();
@@ -325,7 +526,7 @@ class _HomeState extends State<Home> {
   }
 
   Widget txCard(Tx t) {
-    final c = t.debit ? rc : gc;
+    final c = t.kind == 'transfer' ? Colors.blueGrey : t.debit ? rc : gc;
     return Padding(
         padding: const EdgeInsets.only(bottom: 8),
         child: card(
@@ -340,7 +541,7 @@ class _HomeState extends State<Home> {
                 Text(nm(t), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w600)),
                 const SizedBox(height: 2),
                 Text('${dt(t.d)} \u2022 ${tm(t.d)}', style: sub),
-                Text('${t.bank} \u2022 ${t.acc} \u2022 ${t.method}', style: sub),
+                Text('${t.bank} \u2022 ${t.method} \u2022 ${t.kind == 'transfer' ? 'Transfer' : t.cat}', style: sub),
               ])),
               const SizedBox(width: 8),
               Text('${t.debit ? '-' : '+'}${money(t.amt)}', style: TextStyle(fontWeight: FontWeight.bold, color: c)),
@@ -388,6 +589,8 @@ class _HomeState extends State<Home> {
           ]),
         ]),
       ),
+      const SizedBox(height: 14),
+      accountsCard(),
       const SizedBox(height: 14),
       budgetCard(spent(m)),
       const SizedBox(height: 18),
@@ -464,7 +667,9 @@ class _HomeState extends State<Home> {
                     })),
       ),
       const SizedBox(height: 10),
-      chips(const {'all': 'All', 'exp': 'Expense', 'inc': 'Income'}, type, (v) => setState(() => type = v)),
+      chips(const {'all': 'All', 'exp': 'Expense', 'inc': 'Income', 'trf': 'Transfer'}, type, (v) => setState(() => type = v)),
+      const SizedBox(height: 4),
+      chips({'all': 'All Categories', for (final c in [...expCats, ...incCats, 'Transfer']) c: c}, catF, (v) => setState(() => catF = v)),
       const SizedBox(height: 4),
       chips({'all': 'All Banks', for (final s in srcs) s: s}, sv, (v) => setState(() => src = v)),
       const SizedBox(height: 4),
@@ -584,6 +789,14 @@ class _HomeState extends State<Home> {
               Text('Bank: ${t.bank}'),
               Text('Account: ${t.acc}'),
               Text('Method: ${t.method}'),
+              Text('Type: ${t.kind[0].toUpperCase()}${t.kind.substring(1)}  \u2022  Category: ${t.cat}'),
+              TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    editMeta(t);
+                  },
+                  icon: const Icon(Icons.category_outlined, size: 18),
+                  label: const Text('Change type / category')),
               if (t.ref.isNotEmpty) Text('Reference: ${t.ref}'),
               const SizedBox(height: 12),
               Row(children: [
@@ -594,6 +807,17 @@ class _HomeState extends State<Home> {
                     },
                     icon: const Icon(Icons.edit),
                     label: const Text('Rename')),
+                if (!t.manual) ...[
+                  const SizedBox(width: 8),
+                  TextButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        setState(() => hidden.add(t.id));
+                        sp?.setStringList('hidden', hidden.toList());
+                        rev.value++;
+                      },
+                      child: const Text('Ignore'))
+                ],
                 if (t.manual) ...[
                   const SizedBox(width: 8),
                   TextButton(
@@ -664,44 +888,93 @@ class _HomeState extends State<Home> {
   }
 
   void addManual() {
+    final accMap = <String, List<String>>{'Cash': ['Cash', 'Cash']};
+    for (final t in all) {
+      if (t.acc != 'Unknown') accMap[t.bank == 'Unknown' ? t.acc : '${t.bank} ${t.acc}'] = [t.bank, t.acc];
+    }
+    final names2 = accMap.keys.toList();
     final a = TextEditingController(), n = TextEditingController();
-    var deb = true;
-    showDialog(
+    var kind = 'expense', cat = expCats.first, acc = 'Cash', to = names2.first, method = 'UPI';
+    showModalBottomSheet(
         context: context,
+        isScrollControlled: true,
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
         builder: (_) => StatefulBuilder(
-            builder: (ctx, ss) => AlertDialog(
-                  title: const Text('Manual transaction'),
-                  content: SingleChildScrollView(
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+            builder: (ctx, ss) => Padding(
+                padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+                child: SingleChildScrollView(
+                    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Add Transaction', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(value: 'income', label: Text('Income')),
+                        ButtonSegment(value: 'expense', label: Text('Expense')),
+                        ButtonSegment(value: 'transfer', label: Text('Transfer'))
+                      ],
+                      selected: {kind},
+                      onSelectionChanged: (s) => ss(() {
+                            kind = s.first;
+                            cat = catsFor(kind).first;
+                          })),
+                  const SizedBox(height: 8),
+                  TextField(
+                      controller: a,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Amount', prefixText: rs)),
+                  if (kind != 'transfer')
+                    DropdownButtonFormField<String>(
+                        value: cat,
+                        decoration: const InputDecoration(labelText: 'Category'),
+                        items: [for (final c in catsFor(kind)) DropdownMenuItem(value: c, child: Text(c))],
+                        onChanged: (v) => ss(() => cat = v ?? cat)),
+                  DropdownButtonFormField<String>(
+                      value: acc,
+                      decoration: InputDecoration(labelText: kind == 'transfer' ? 'From account' : 'Account'),
+                      items: [for (final c in names2) DropdownMenuItem(value: c, child: Text(c))],
+                      onChanged: (v) => ss(() => acc = v ?? acc)),
+                  if (kind == 'transfer')
+                    DropdownButtonFormField<String>(
+                        value: to,
+                        decoration: const InputDecoration(labelText: 'To account'),
+                        items: [for (final c in names2) DropdownMenuItem(value: c, child: Text(c))],
+                        onChanged: (v) => ss(() => to = v ?? to))
+                  else
                     TextField(
-                        controller: a,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(labelText: 'Amount')),
-                    TextField(controller: n, decoration: const InputDecoration(labelText: 'Naam / description')),
-                    const SizedBox(height: 12),
-                    SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment(value: true, label: Text('Expense')),
-                          ButtonSegment(value: false, label: Text('Income'))
-                        ],
-                        selected: {deb},
-                        onSelectionChanged: (s) => ss(() => deb = s.first)),
-                  ])),
-                  actions: [
-                    TextButton(
-                        onPressed: () {
-                          final v = double.tryParse(a.text);
-                          if (v == null || v <= 0) return;
-                          final now = DateTime.now();
-                          setState(() => manual.add(Tx('m${now.microsecondsSinceEpoch}', now, v, deb, 'Manual',
-                              'Manual', 'Cash', n.text.trim().isEmpty ? '-' : n.text.trim(), '',
-                              manual: true)));
-                          saveManual();
-                          Navigator.pop(ctx);
-                        },
-                        child: const Text('Add'))
-                  ],
-                )));
+                        controller: n,
+                        decoration: InputDecoration(labelText: kind == 'income' ? 'Received from' : 'Paid to')),
+                  DropdownButtonFormField<String>(
+                      value: method,
+                      decoration: const InputDecoration(labelText: 'Payment'),
+                      items: [for (final c in const ['UPI', 'Cash', 'Card', 'NEFT/IMPS', 'Other']) DropdownMenuItem(value: c, child: Text(c))],
+                      onChanged: (v) => ss(() => method = v ?? method)),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                          onPressed: () {
+                            final v = double.tryParse(a.text);
+                            if (v == null || v <= 0) return;
+                            if (kind == 'transfer' && acc == to) return;
+                            final now = DateTime.now();
+                            final base = 'm${now.microsecondsSinceEpoch}';
+                            final nm1 = n.text.trim().isEmpty ? '-' : n.text.trim();
+                            Tx mk(String id, bool deb, String ac, String party) => Tx(id, now, v, deb, accMap[ac]![1],
+                                accMap[ac]![0], method, party, '',
+                                manual: true, kind: kind, cat: kind == 'transfer' ? 'Transfer' : cat);
+                            setState(() {
+                              if (kind == 'transfer') {
+                                manual.add(mk('${base}a', true, acc, 'To $to'));
+                                manual.add(mk('${base}b', false, to, 'From $acc'));
+                              } else {
+                                manual.add(mk(base, kind == 'expense', acc, nm1));
+                              }
+                            });
+                            saveManual();
+                            Navigator.pop(ctx);
+                          },
+                          child: const Text('Save Transaction'))),
+                ])))));
   }
 
   Widget reportPage() {
@@ -714,18 +987,22 @@ class _HomeState extends State<Home> {
     for (final t in l) {
       final i = t.d.difference(start).inDays;
       if (i < 0 || i >= rd) continue;
+      if (t.kind == 'transfer') continue;
       (t.debit ? ex : inc)[i] += t.amt;
       cnt[i]++;
     }
-    final byAcc = <String, double>{}, accCnt = <String, int>{}, top = <String, double>{};
-    for (final t in l.where((t) => t.debit)) {
+    final byAcc = <String, double>{}, accCnt = <String, int>{}, top = <String, double>{}, ct = <String, double>{};
+    for (final t in l.where((t) => t.debit && t.kind != 'transfer')) {
       final k = t.bank == 'Unknown' || t.bank == t.acc ? t.acc : '${t.bank} ${t.acc}';
       byAcc[k] = (byAcc[k] ?? 0) + t.amt;
       accCnt[k] = (accCnt[k] ?? 0) + 1;
       top[nm(t)] = (top[nm(t)] ?? 0) + t.amt;
+      ct[t.cat] = (ct[t.cat] ?? 0) + t.amt;
     }
     final keys = byAcc.keys.toList();
     final tk = top.keys.toList()..sort((a, b) => top[b]!.compareTo(top[a]!));
+    final ck = ct.keys.toList()..sort((a, b) => ct[b]!.compareTo(ct[a]!));
+    final ctTotal = ct.values.fold<double>(0, (a, v) => a + v);
     final step = rd <= 7 ? 1 : rd <= 15 ? 2 : 5;
     final colors = [Colors.indigo, Colors.purple, Colors.teal, Colors.orange, Colors.pink, Colors.cyan];
     final net = got(l) - spent(l);
@@ -821,6 +1098,20 @@ class _HomeState extends State<Home> {
                   style: const TextStyle(fontWeight: FontWeight.bold))),
       ])),
       gap,
+      card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Categories', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        if (ck.isEmpty) const Text('Is period me koi kharcha nahi'),
+        for (final k in ck)
+          Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(children: [
+                Expanded(child: Text(k)),
+                Text('${(ct[k]! * 100 / ctTotal).round()}%  ', style: sub),
+                Text(money(ct[k]!), style: const TextStyle(fontWeight: FontWeight.bold)),
+              ])),
+      ])),
+      gap,
       const Text('Top spending people / merchants', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
       const SizedBox(height: 8),
       if (tk.isEmpty) const Text('Is period me koi kharcha nahi'),
@@ -842,6 +1133,7 @@ class _HomeState extends State<Home> {
     final dim = DateTime(n.year, n.month + 1, 0).day;
     final left = dim - n.day + 1;
     final safe = (budget - sp) / left;
+    final mm = all.where((t) => t.d.year == n.year && t.d.month == n.month && t.kind == 'expense').toList();
     return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 24), children: [
       head('Budget', sub: '${mon[n.month - 1]} ${n.year}'),
       budgetCard(sp),
@@ -853,6 +1145,10 @@ class _HomeState extends State<Home> {
         const SizedBox(height: 12),
         stat('Roz kitna kharch kar sakte ho', safe > 0 ? money(safe) : '${rs}0', safe > 0 ? gc : rc),
       ])),
+      const SizedBox(height: 18),
+      const Text('Category budgets', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 8),
+      for (final c in expCats) catBudgetCard(c, spent(mm.where((t) => t.cat == c).toList())),
       const SizedBox(height: 14),
       FilledButton.tonalIcon(onPressed: editBudget, icon: const Icon(Icons.edit), label: const Text('Edit budget')),
     ]);
