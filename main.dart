@@ -182,6 +182,10 @@ class _HomeState extends State<Home> {
     meta = (jsonDecode(sp!.getString('meta') ?? '{}') as Map)
         .map<String, Map<String, String>>((k, v) => MapEntry(k.toString(), Map<String, String>.from(v as Map)));
     cb = (jsonDecode(sp!.getString('cb') ?? '{}') as Map).map<String, double>((k, v) => MapEntry(k.toString(), (v as num).toDouble()));
+    rec = ld('rec');
+    loans = ld('loans');
+    goals = ld('goals');
+    dupOk = (sp!.getStringList('dupok') ?? <String>[]).toSet();
     manual = (jsonDecode(sp!.getString('manual') ?? '[]') as List)
         .map((e) => Tx.fromJson(Map<String, dynamic>.from(e)))
         .toList();
@@ -389,6 +393,305 @@ class _HomeState extends State<Home> {
             ])));
   }
 
+  List<Map<String, dynamic>> rec = [], loans = [], goals = [];
+  Set<String> dupOk = {}, dupSet = {};
+  int dupKey = -1;
+  final recF = const [['name', 'Naam (Rent, Netflix...)', 't'], ['amt', 'Amount', 'n'], ['day', 'Mahine ki tareekh (1-31)', 'n']];
+  final loanF = const [['name', 'Loan naam', 't'], ['emi', 'EMI amount', 'n'], ['day', 'EMI tareekh (1-31)', 'n'], ['months', 'Total mahine', 'n'], ['paid', 'Ab tak kitne EMI bhare', 'n']];
+  final goalF = const [['name', 'Goal naam', 't'], ['target', 'Target amount', 'n'], ['saved', 'Ab tak jama', 'n']];
+
+  List<Map<String, dynamic>> ld(String k) =>
+      (jsonDecode(sp!.getString(k) ?? '[]') as List).map((e) => Map<String, dynamic>.from(e)).toList();
+  double nv(Map m, String k) => double.tryParse('${m[k]}') ?? 0;
+  String fs(dynamic v) => v is double && v == v.roundToDouble() ? v.toInt().toString() : '$v';
+
+  void saveLists() {
+    sp?.setString('rec', jsonEncode(rec));
+    sp?.setString('loans', jsonEncode(loans));
+    sp?.setString('goals', jsonEncode(goals));
+    setState(() {});
+    rev.value++;
+  }
+
+  bool isDup(Tx t) {
+    final k = sms.length * 100003 + manual.length * 101 + hidden.length * 7 + dupOk.length;
+    if (k != dupKey) {
+      dupKey = k;
+      final g = <String, List<Tx>>{};
+      for (final x in all) {
+        (g['${x.party.toLowerCase()}|${x.amt}|${x.acc}|${x.debit}'] ??= []).add(x);
+      }
+      dupSet = {};
+      for (final l in g.values) {
+        if (l.length < 2) continue;
+        l.sort((a, b) => a.d.compareTo(b.d));
+        for (var i = 1; i < l.length; i++) {
+          if (l[i].d.difference(l[i - 1].d).inSeconds.abs() <= 120) {
+            dupSet
+              ..add(l[i].id)
+              ..add(l[i - 1].id);
+          }
+        }
+      }
+      dupSet.removeAll(dupOk);
+    }
+    return dupSet.contains(t.id);
+  }
+
+  DateTime nextDue(int day) {
+    final n = DateTime.now();
+    final t = DateTime(n.year, n.month, n.day);
+    DateTime mk(int y, int m) => DateTime(y, m, day.clamp(1, DateTime(y, m + 1, 0).day).toInt());
+    final a = mk(n.year, n.month);
+    return a.isBefore(t) ? mk(n.year, n.month + 1) : a;
+  }
+
+  List<Map<String, dynamic>> dues() {
+    final out = <Map<String, dynamic>>[];
+    for (final r in rec) {
+      out.add({'n': '${r['name']}', 'a': nv(r, 'amt'), 'd': nextDue(nv(r, 'day').toInt()), 'k': 'Bill'});
+    }
+    for (final l in loans) {
+      if (nv(l, 'paid') < nv(l, 'months')) {
+        out.add({'n': '${l['name']}', 'a': nv(l, 'emi'), 'd': nextDue(nv(l, 'day').toInt()), 'k': 'EMI'});
+      }
+    }
+    out.sort((a, b) => (a['d'] as DateTime).compareTo(b['d'] as DateTime));
+    return out;
+  }
+
+  double upcomingMonth() {
+    final n = DateTime.now();
+    return dues().where((x) {
+      final d = x['d'] as DateTime;
+      return d.month == n.month && d.year == n.year;
+    }).fold<double>(0, (s, x) => s + (x['a'] as double));
+  }
+
+  Widget upcomingCard() {
+    final n = DateTime.now();
+    final lim = DateTime(n.year, n.month, n.day).add(const Duration(days: 8));
+    final u = dues().where((x) => (x['d'] as DateTime).isBefore(lim)).toList();
+    if (u.isEmpty) return const SizedBox.shrink();
+    return Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Upcoming (7 din)', style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          for (final x in u)
+            Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  Expanded(child: Text('${x['k']}: ${x['n']}  \u2022  ${dt(x['d'] as DateTime)}')),
+                  Text(money(x['a'] as double), style: const TextStyle(fontWeight: FontWeight.bold)),
+                ])),
+        ])));
+  }
+
+  Future<Map<String, String>?> ask(String title, List<List<String>> f, [Map<String, String>? init]) {
+    final c = {for (final x in f) x[0]: TextEditingController(text: init?[x[0]] ?? '')};
+    return showDialog<Map<String, String>>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+              title: Text(title),
+              content: SingleChildScrollView(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                for (final x in f)
+                  TextField(
+                      controller: c[x[0]],
+                      keyboardType: x[2] == 'n' ? TextInputType.number : TextInputType.text,
+                      decoration: InputDecoration(labelText: x[1]))
+              ])),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(ctx, {for (final e in c.entries) e.key: e.value.text.trim()}),
+                    child: const Text('Save'))
+              ],
+            ));
+  }
+
+  Future<void> editItem(List<Map<String, dynamic>> list, int? i, String title, List<List<String>> f) async {
+    final r = await ask(title, f, i == null ? null : {for (final x in f) x[0]: fs(list[i][x[0]])});
+    if (r == null || (r[f.first[0]] ?? '').isEmpty) return;
+    final m = <String, dynamic>{
+      for (final x in f) x[0]: x[2] == 'n' ? (double.tryParse(r[x[0]]!) ?? 0) : r[x[0]]
+    };
+    if (m.containsKey('day')) m['day'] = nv(m, 'day').clamp(1, 31).toDouble();
+    if (i == null) {
+      list.add(m);
+    } else {
+      list[i] = m;
+    }
+    saveLists();
+  }
+
+  void openPage(String title, List<Widget> Function() body, VoidCallback onAdd) {
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => ValueListenableBuilder<int>(
+                valueListenable: rev,
+                builder: (ctx, _, __) => Scaffold(
+                      appBar: AppBar(title: Text(title)),
+                      floatingActionButton:
+                          FloatingActionButton.extended(onPressed: onAdd, icon: const Icon(Icons.add), label: const Text('Add')),
+                      body: ListView(padding: const EdgeInsets.fromLTRB(16, 8, 16, 96), children: body()),
+                    ))));
+  }
+
+  Widget emptyNote(String s) => Padding(padding: const EdgeInsets.all(24), child: Center(child: Text(s, textAlign: TextAlign.center)));
+  Widget gap8(Widget w) => Padding(padding: const EdgeInsets.only(bottom: 8), child: w);
+
+  List<Widget> recBody() => [
+        if (rec.isEmpty) emptyNote('Koi recurring payment nahi.\n+ Add dabao (rent, Netflix, recharge...)'),
+        for (var i = 0; i < rec.length; i++)
+          gap8(card(Row(children: [
+            const Icon(Icons.repeat),
+            const SizedBox(width: 12),
+            Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('${rec[i]['name']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+              Text('${money(nv(rec[i], 'amt'))} \u2022 har mahine ${fs(rec[i]['day'])} tareekh', style: sub),
+              Text('Next: ${dt(nextDue(nv(rec[i], 'day').toInt()))}', style: sub),
+            ])),
+            PopupMenuButton<String>(
+                onSelected: (v) {
+                  if (v == 'del') {
+                    rec.removeAt(i);
+                    saveLists();
+                  } else {
+                    editItem(rec, i, 'Edit', recF);
+                  }
+                },
+                itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'edit', child: Text('Edit')),
+                      PopupMenuItem(value: 'del', child: Text('Delete'))
+                    ]),
+          ]))),
+      ];
+
+  List<Widget> loanBody() {
+    final act = loans.where((l) => nv(l, 'paid') < nv(l, 'months')).toList();
+    final monthly = act.fold<double>(0, (s, l) => s + nv(l, 'emi'));
+    final remain = act.fold<double>(0, (s, l) => s + (nv(l, 'months') - nv(l, 'paid')) * nv(l, 'emi'));
+    return [
+      gap8(card(Row(children: [
+        Expanded(child: stat('Monthly EMI', money(monthly), rc)),
+        Expanded(child: stat('Total remaining', money(remain), cs.onSurface)),
+      ]))),
+      if (loans.isEmpty) emptyNote('Koi loan / EMI nahi.\n+ Add dabao'),
+      for (var i = 0; i < loans.length; i++)
+        gap8(card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text('${loans[i]['name']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+            PopupMenuButton<String>(
+                onSelected: (v) {
+                  if (v == 'del') {
+                    loans.removeAt(i);
+                    saveLists();
+                  } else if (v == 'paid') {
+                    if (nv(loans[i], 'paid') < nv(loans[i], 'months')) {
+                      loans[i]['paid'] = nv(loans[i], 'paid') + 1;
+                      saveLists();
+                    }
+                  } else {
+                    editItem(loans, i, 'Edit loan', loanF);
+                  }
+                },
+                itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'paid', child: Text('EMI paid (+1)')),
+                      PopupMenuItem(value: 'edit', child: Text('Edit')),
+                      PopupMenuItem(value: 'del', child: Text('Delete'))
+                    ]),
+          ]),
+          Text('${money(nv(loans[i], 'emi'))} / month'),
+          const SizedBox(height: 8),
+          ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                  value: nv(loans[i], 'months') > 0
+                      ? (nv(loans[i], 'paid') / nv(loans[i], 'months')).clamp(0.0, 1.0).toDouble()
+                      : 0.0,
+                  minHeight: 8,
+                  color: gc)),
+          const SizedBox(height: 6),
+          Text('Paid ${fs(loans[i]['paid'])} / ${fs(loans[i]['months'])}  \u2022  Remaining ${money((nv(loans[i], 'months') - nv(loans[i], 'paid')) * nv(loans[i], 'emi'))}',
+              style: sub),
+          Text(nv(loans[i], 'paid') < nv(loans[i], 'months')
+              ? 'Next EMI: ${dt(nextDue(nv(loans[i], 'day').toInt()))}'
+              : 'Loan complete!', style: sub),
+        ]))),
+    ];
+  }
+
+  List<Widget> goalBody() => [
+        if (goals.isEmpty) emptyNote('Koi savings goal nahi.\n+ Add dabao (House, Phone, Emergency...)'),
+        for (var i = 0; i < goals.length; i++)
+          gap8(card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Expanded(child: Text('${goals[i]['name']}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+              PopupMenuButton<String>(
+                  onSelected: (v) async {
+                    if (v == 'del') {
+                      goals.removeAt(i);
+                      saveLists();
+                    } else if (v == 'add') {
+                      final r = await ask('Paise jodo', [['amt', 'Amount', 'n']]);
+                      final a = double.tryParse(r?['amt'] ?? '') ?? 0;
+                      if (a > 0) {
+                        goals[i]['saved'] = nv(goals[i], 'saved') + a;
+                        saveLists();
+                      }
+                    } else {
+                      editItem(goals, i, 'Edit goal', goalF);
+                    }
+                  },
+                  itemBuilder: (_) => const [
+                        PopupMenuItem(value: 'add', child: Text('Paise jodo')),
+                        PopupMenuItem(value: 'edit', child: Text('Edit')),
+                        PopupMenuItem(value: 'del', child: Text('Delete'))
+                      ]),
+            ]),
+            Text('${money(nv(goals[i], 'saved'))} / ${money(nv(goals[i], 'target'))}'),
+            const SizedBox(height: 8),
+            ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                    value: nv(goals[i], 'target') > 0
+                        ? (nv(goals[i], 'saved') / nv(goals[i], 'target')).clamp(0.0, 1.0).toDouble()
+                        : 0.0,
+                    minHeight: 8,
+                    color: gc)),
+            const SizedBox(height: 4),
+            Text('${nv(goals[i], 'target') > 0 ? (nv(goals[i], 'saved') * 100 / nv(goals[i], 'target')).round() : 0}% complete', style: sub),
+          ]))),
+      ];
+
+  Widget moreTile(IconData ic, String t, String s, VoidCallback f) => gap8(card(
+      onTap: f,
+      Row(children: [
+        CircleAvatar(child: Icon(ic)),
+        const SizedBox(width: 12),
+        Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(t, style: const TextStyle(fontWeight: FontWeight.bold)),
+          Text(s, style: sub),
+        ])),
+        const Icon(Icons.chevron_right),
+      ])));
+
+  Widget morePage() {
+    final monthly = loans.where((l) => nv(l, 'paid') < nv(l, 'months')).fold<double>(0, (s, l) => s + nv(l, 'emi'));
+    return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 24), children: [
+      head('More'),
+      moreTile(Icons.repeat, 'Recurring Payments', '${rec.length} payments', () => openPage('Recurring Payments', recBody, () => editItem(rec, null, 'Recurring payment', recF))),
+      moreTile(Icons.account_balance, 'EMI / Loans', 'Monthly EMI ${money(monthly)}', () => openPage('EMI / Loans', loanBody, () => editItem(loans, null, 'EMI / Loan', loanF))),
+      moreTile(Icons.savings_outlined, 'Savings Goals', '${goals.length} goals', () => openPage('Savings Goals', goalBody, () => editItem(goals, null, 'Savings goal', goalF))),
+    ]);
+  }
+
   List<Tx> get all => [...sms, ...manual].where((t) => !hidden.contains(t.id)).toList();
   String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
 
@@ -477,6 +780,8 @@ class _HomeState extends State<Home> {
           return reportPage();
         case 3:
           return budgetPage();
+        case 4:
+          return morePage();
         default:
           return home();
       }
@@ -502,6 +807,7 @@ class _HomeState extends State<Home> {
                 icon: Icon(Icons.account_balance_wallet_outlined),
                 selectedIcon: Icon(Icons.account_balance_wallet),
                 label: 'Budget'),
+            NavigationDestination(icon: Icon(Icons.apps_outlined), selectedIcon: Icon(Icons.apps), label: 'More'),
           ]),
     );
   }
@@ -542,6 +848,7 @@ class _HomeState extends State<Home> {
                 const SizedBox(height: 2),
                 Text('${dt(t.d)} \u2022 ${tm(t.d)}', style: sub),
                 Text('${t.bank} \u2022 ${t.method} \u2022 ${t.kind == 'transfer' ? 'Transfer' : t.cat}', style: sub),
+                if (isDup(t)) const Text('\u26A0 Possible duplicate', style: TextStyle(fontSize: 12, color: Colors.amber)),
               ])),
               const SizedBox(width: 8),
               Text('${t.debit ? '-' : '+'}${money(t.amt)}', style: TextStyle(fontWeight: FontWeight.bold, color: c)),
@@ -593,7 +900,9 @@ class _HomeState extends State<Home> {
       accountsCard(),
       const SizedBox(height: 14),
       budgetCard(spent(m)),
-      const SizedBox(height: 18),
+      const SizedBox(height: 14),
+      upcomingCard(),
+      const SizedBox(height: 4),
       Row(children: [
         const Expanded(child: Text('Recent Transactions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
         TextButton(onPressed: () => setState(() => tab = 1), child: const Text('See all')),
@@ -797,6 +1106,16 @@ class _HomeState extends State<Home> {
                   },
                   icon: const Icon(Icons.category_outlined, size: 18),
                   label: const Text('Change type / category')),
+              if (isDup(t))
+                TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      setState(() => dupOk.add(t.id));
+                      sp?.setStringList('dupok', dupOk.toList());
+                      rev.value++;
+                    },
+                    icon: const Icon(Icons.check, size: 18),
+                    label: const Text('Keep both (duplicate nahi hai)')),
               if (t.ref.isNotEmpty) Text('Reference: ${t.ref}'),
               const SizedBox(height: 12),
               Row(children: [
@@ -1132,7 +1451,8 @@ class _HomeState extends State<Home> {
     final sp = spent(all.where((t) => t.d.year == n.year && t.d.month == n.month).toList());
     final dim = DateTime(n.year, n.month + 1, 0).day;
     final left = dim - n.day + 1;
-    final safe = (budget - sp) / left;
+    final up = upcomingMonth();
+    final safe = (budget - sp - up) / left;
     final mm = all.where((t) => t.d.year == n.year && t.d.month == n.month && t.kind == 'expense').toList();
     return ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 24), children: [
       head('Budget', sub: '${mon[n.month - 1]} ${n.year}'),
@@ -1142,6 +1462,8 @@ class _HomeState extends State<Home> {
         stat('Daily average so far', money(sp / n.day), cs.onSurface),
         const SizedBox(height: 12),
         stat('Mahine ke baaki din', '$left', cs.onSurface),
+        const SizedBox(height: 12),
+        stat('Baaki bills / EMI (is mahine)', money(up), cs.onSurface),
         const SizedBox(height: 12),
         stat('Roz kitna kharch kar sakte ho', safe > 0 ? money(safe) : '${rs}0', safe > 0 ? gc : rc),
       ])),
