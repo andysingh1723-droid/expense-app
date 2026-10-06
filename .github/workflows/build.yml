@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build Flutter APK
@@ -22,8 +25,23 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter version
+      - name: Check Flutter
         run: flutter --version
+
+      - name: Check project files
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Repository files:"
+          ls -la
+          echo "Flutter source:"
+          ls -la lib
+          echo "Pubspec:"
+          cat pubspec.yaml
+
+      - name: Generate Android project
+        run: |
+          flutter create . --platforms=android --project-name=expense_tracker
 
       - name: Get dependencies
         run: flutter pub get
@@ -32,11 +50,11 @@ jobs:
         run: flutter analyze
         continue-on-error: true
 
-      - name: Build APK
+      - name: Build release APK
         run: flutter build apk --release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: expense-tracker-apk
+          name: expense-tracker-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
