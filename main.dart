@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:enough_mail/enough_mail.dart' as mail;
 import 'package:another_telephony/telephony.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -39,10 +40,10 @@ class Tx {
   final DateTime d;
   final double amt;
   final bool debit, manual;
-  String kind, cat;
+  String kind, cat, src;
   double? bal;
   Tx(this.id, this.d, this.amt, this.debit, this.acc, this.bank, this.method, this.party, this.ref,
-      {this.manual = false, this.kind = 'expense', this.cat = 'Other', this.bal});
+      {this.manual = false, this.kind = 'expense', this.cat = 'Other', this.bal, this.src = 'sms'});
   Map<String, dynamic> toJson() => {
         'id': id, 'd': d.millisecondsSinceEpoch, 'a': amt, 'db': debit,
         'ac': acc, 'b': bank, 'm': method, 'p': party, 'r': ref, 'k': kind, 'c': cat
@@ -191,10 +192,19 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     pin = sp!.getString('pin');
     hideBal = sp!.getBool('hide') ?? false;
     WidgetsBinding.instance.addPostFrameCallback((_) => showLock());
+    final sv = sp!.getInt('start');
+    if (sv == null) {
+      final n = DateTime.now();
+      startD = DateTime(n.year, n.month, n.day);
+      sp!.setInt('start', startD.millisecondsSinceEpoch);
+    } else {
+      startD = DateTime.fromMillisecondsSinceEpoch(sv);
+    }
     manual = (jsonDecode(sp!.getString('manual') ?? '[]') as List)
         .map((e) => Tx.fromJson(Map<String, dynamic>.from(e)))
         .toList();
     await load();
+    syncEmail();
   }
 
   Future<void> load() async {
@@ -233,6 +243,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     final x = parse(m.body ?? '', m.date ?? DateTime.now().millisecondsSinceEpoch, m.address ?? '');
     if (x != null && seen.add(x.id) && mounted) {
       applyMeta(x);
+      mails.removeWhere((e) => e.id == x.id || near(e, x));
       setState(() => sms.insert(0, x));
     }
   }
@@ -254,9 +265,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Map<String, double> balances() {
     final out = <String, double>{};
     final when = <String, DateTime>{};
-    var cash = 0.0;
-    for (final t in all) {
-      if (t.bal != null && t.acc != 'Unknown') {
+    for (final t in [...sms, ...mails]) {
+      if (t.bal != null && t.acc != 'Unknown' && !hidden.contains(t.id)) {
         final k = t.bank == 'Unknown' ? t.acc : '${t.bank} ${t.acc}';
         final p = when[k];
         if (p == null || t.d.isAfter(p)) {
@@ -264,6 +274,9 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           out[k] = t.bal!;
         }
       }
+    }
+    var cash = 0.0;
+    for (final t in all) {
       if (t.manual && t.acc == 'Cash') cash += t.debit ? -t.amt : t.amt;
       if (!t.manual && t.method == 'ATM' && t.debit && t.kind == 'transfer') cash += t.amt;
     }
@@ -421,7 +434,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   }
 
   bool isDup(Tx t) {
-    final k = sms.length * 100003 + manual.length * 101 + hidden.length * 7 + dupOk.length;
+    final k = mails.length * 13 + sms.length * 100003 + manual.length * 101 + hidden.length * 7 + dupOk.length;
     if (k != dupKey) {
       dupKey = k;
       final g = <String, List<Tx>>{};
@@ -508,7 +521,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
                   TextField(
                       controller: c[x[0]],
                       keyboardType: x[2] == 'n' || x[2] == 'p' ? TextInputType.number : TextInputType.text,
-                      obscureText: x[2] == 'p',
+                      obscureText: x[2] == 'p' || x[2] == 'w',
                       decoration: InputDecoration(labelText: x[1]))
               ])),
               actions: [
@@ -698,6 +711,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       moreTile(Icons.repeat, 'Recurring Payments', '${rec.length} payments', () => openPage('Recurring Payments', recBody, () => editItem(rec, null, 'Recurring payment', recF))),
       moreTile(Icons.account_balance, 'EMI / Loans', 'Monthly EMI ${money(monthly)}', () => openPage('EMI / Loans', loanBody, () => editItem(loans, null, 'EMI / Loan', loanF))),
       moreTile(Icons.savings_outlined, 'Savings Goals', '${goals.length} goals', () => openPage('Savings Goals', goalBody, () => editItem(goals, null, 'Savings goal', goalF))),
+      moreTile(Icons.insights_outlined, 'Tracking Report', 'SMS / Email / Manual ka summary', () => openPage('Tracking Report', trackBody, null)),
       moreTile(Icons.settings_outlined, 'Settings', 'App lock, backup, export', () => openPage('Settings', settingsBody, null)),
     ]);
   }
@@ -873,13 +887,187 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           moreTile(Icons.lock, 'PIN badlo', 'App Lock on hai', changePin),
           moreTile(Icons.lock_open, 'PIN hatao', 'App Lock band karo', removePin),
         ],
+        moreTile(Icons.event_available_outlined, 'Tracking start date', '${dt(startD)} se pehle ki entries nahi dikhengi', pickStart),
+        if (sp?.getString('eAddr') == null)
+          moreTile(Icons.email_outlined, 'Email tracking (Gmail)', 'Off \u2022 Gmail jodo', setupEmail)
+        else ...[
+          moreTile(Icons.sync, 'Email sync abhi', emStatus.isEmpty ? '${sp?.getString('eAddr')}' : emStatus, syncEmail),
+          moreTile(Icons.email, 'Email hatao', 'Email tracking band karo', removeEmail),
+        ],
         moreTile(Icons.backup_outlined, 'Backup', 'Poora data copy hoga, Notes/WhatsApp me save karo', backup),
         moreTile(Icons.restore, 'Restore', 'Backup text paste karke wapas lao', restoreDialog),
         moreTile(Icons.table_chart_outlined, 'Export CSV', 'Sheets/Excel me paste karne ke liye', exportCsv),
         moreTile(Icons.info_outline, 'About', 'Mera Kharcha \u2022 data sirf is phone me rehta hai', () {}),
       ];
 
-  List<Tx> get all => [...sms, ...manual].where((t) => !hidden.contains(t.id)).toList();
+  int trd = 0;
+  List<Tx> mails = [];
+  DateTime startD = DateTime(2000);
+  bool emBusy = false;
+  String emStatus = '';
+
+  bool near(Tx a, Tx b) =>
+      a.amt == b.amt &&
+      a.debit == b.debit &&
+      a.d.difference(b.d).inMinutes.abs() <= 15 &&
+      (a.acc == b.acc || a.acc == 'Unknown' || b.acc == 'Unknown');
+
+  Tx asEmail(Tx x) => Tx(x.id.startsWith('r') ? x.id : 'e${x.id}', x.d, x.amt, x.debit, x.acc, x.bank, x.method, x.party, x.ref,
+      kind: x.kind, cat: x.cat, bal: x.bal, src: 'email');
+
+  Future<void> pickStart() async {
+    final p = await showDatePicker(context: context, initialDate: startD, firstDate: DateTime(2015), lastDate: DateTime.now());
+    if (p == null) return;
+    setState(() => startD = DateTime(p.year, p.month, p.day));
+    sp?.setInt('start', startD.millisecondsSinceEpoch);
+    rev.value++;
+    snack('Ab ${dt(startD)} se pehle ki entries nahi dikhengi');
+  }
+
+  Future<void> setupEmail() async {
+    final r = await ask('Gmail se jodo', [['a', 'Gmail address', 't'], ['b', 'App Password (16 letter)', 'w']]);
+    if (r == null || !(r['a'] ?? '').contains('@') || (r['b'] ?? '').isEmpty) return;
+    sp?.setString('eAddr', r['a']!.trim());
+    sp?.setString('ePass', r['b']!.replaceAll(' ', ''));
+    setState(() {});
+    rev.value++;
+    await syncEmail();
+  }
+
+  void removeEmail() {
+    sp?.remove('eAddr');
+    sp?.remove('ePass');
+    setState(() {
+      mails = [];
+      emStatus = '';
+    });
+    rev.value++;
+    snack('Email tracking band ho gaya');
+  }
+
+  Future<void> syncEmail() async {
+    final addr = sp?.getString('eAddr'), pass = sp?.getString('ePass');
+    if (addr == null || pass == null || emBusy) return;
+    emBusy = true;
+    final client = mail.ImapClient(isLogEnabled: false);
+    try {
+      await client.connectToServer('imap.gmail.com', 993, isSecure: true);
+      await client.login(addr, pass);
+      await client.selectInbox();
+      final r = await client.fetchRecentMessages(messageCount: 150, criteria: 'BODY.PEEK[]');
+      final out = <Tx>[];
+      final ids = <String>{};
+      for (final m in r.messages) {
+        final d = m.decodeDate() ?? DateTime.now();
+        if (d.isBefore(startD)) continue;
+        var text = m.decodeTextPlainPart() ?? '';
+        if (text.trim().isEmpty) {
+          text = (m.decodeTextHtmlPart() ?? '')
+              .replaceAll(RegExp(r'<(style|script)[^>]*>.*?</\1>', dotAll: true, caseSensitive: false), ' ')
+              .replaceAll(RegExp(r'<[^>]*>'), ' ')
+              .replaceAll('&nbsp;', ' ')
+              .replaceAll('&amp;', '&');
+        }
+        text = '${m.decodeSubject() ?? ''}. $text'.replaceAll(RegExp(r'\s+'), ' ');
+        text = text.replaceAll(RegExp(r'[^.]*\b(?:otp|request)\b[^.]*\.', caseSensitive: false), ' ');
+        final from = (m.from != null && m.from!.isNotEmpty) ? m.from!.first.email : '';
+        final x = parse(text, d.millisecondsSinceEpoch, from);
+        if (x == null) continue;
+        final e = asEmail(x);
+        if (seen.contains(e.id) || sms.any((s) => near(s, e)) || !ids.add(e.id)) continue;
+        applyMeta(e);
+        out.add(e);
+      }
+      try {
+        await client.logout();
+      } catch (_) {}
+      if (!mounted) return;
+      final n = DateTime.now();
+      setState(() {
+        mails = out;
+        emStatus = '${out.length} email transactions \u2022 sync ${tm(n)}';
+      });
+      rev.value++;
+    } catch (e) {
+      snack('Email sync fail: $e');
+    } finally {
+      emBusy = false;
+    }
+  }
+
+  List<Widget> trackBody() {
+    final now = DateTime.now();
+    final from = trd == 0 ? startD : DateTime(now.year, now.month, now.day).subtract(Duration(days: trd - 1));
+    final l = all.where((t) => !t.d.isBefore(from)).toList()..sort((a, b) => b.d.compareTo(a.d));
+    String srcOf(Tx t) => t.manual ? 'Manual' : t.src == 'email' ? 'Email' : 'SMS';
+    final bySrc = <String, List<Tx>>{};
+    final bank = <String, double>{}, cat = <String, double>{};
+    for (final t in l) {
+      (bySrc[srcOf(t)] ??= []).add(t);
+      if (t.debit && t.kind != 'transfer') {
+        bank[t.bank] = (bank[t.bank] ?? 0) + t.amt;
+        cat[t.cat] = (cat[t.cat] ?? 0) + t.amt;
+      }
+    }
+    final emails = bySrc['Email'] ?? <Tx>[];
+    Widget kv(String title, Map<String, double> m) {
+      final k = m.keys.toList()..sort((a, b) => m[b]!.compareTo(m[a]!));
+      return gap8(card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 6),
+        if (k.isEmpty) Text('Koi data nahi', style: sub),
+        for (final x in k.take(8))
+          Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(children: [Expanded(child: Text(x)), Text(money(m[x]!), style: const TextStyle(fontWeight: FontWeight.bold))])),
+      ])));
+    }
+
+    final net = got(l) - spent(l);
+    return [
+      chips(const {'0': 'Since start', '7': '7 Days', '30': '1 Month'}, '$trd', (v) {
+        trd = int.parse(v);
+        setState(() {});
+        rev.value++;
+      }),
+      const SizedBox(height: 10),
+      gap8(card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('Tracking: ${dt(from)} se aaj tak', style: sub),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(child: stat('Expense', money(spent(l)), rc)),
+          Expanded(child: stat('Income', money(got(l)), gc)),
+          Expanded(child: stat('Net', sm(net), cs.onSurface)),
+        ]),
+        const SizedBox(height: 8),
+        Text('${l.length} transactions'),
+      ]))),
+      gap8(card(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Source-wise', style: TextStyle(fontWeight: FontWeight.bold)),
+        const SizedBox(height: 6),
+        for (final e in const ['SMS', 'Email', 'Manual'])
+          Padding(
+              padding: const EdgeInsets.symmetric(vertical: 3),
+              child: Row(children: [
+                Expanded(child: Text(e)),
+                Text('${(bySrc[e] ?? <Tx>[]).length} txns \u2022 Out ${money(spent(bySrc[e] ?? <Tx>[]))} \u2022 In ${money(got(bySrc[e] ?? <Tx>[]))}', style: sub),
+              ])),
+      ]))),
+      kv('Bank-wise kharcha', bank),
+      kv('Category-wise kharcha', cat),
+      const SizedBox(height: 6),
+      const Text('Email se mile transactions', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+      const SizedBox(height: 8),
+      if (sp?.getString('eAddr') == null)
+        emptyNote('Email tracking off hai.\nSettings me Gmail jodo.')
+      else if (emails.isEmpty)
+        emptyNote('Is period me email se koi transaction nahi mila.')
+      else
+        for (final t in emails.take(40)) txCard(t),
+    ];
+  }
+
+  List<Tx> get all => [...sms, ...mails, ...manual].where((t) => !hidden.contains(t.id) && !t.d.isBefore(startD)).toList();
   String nm(Tx t) => names[t.id] ?? alias[t.party.toLowerCase()] ?? (t.party == '-' || RegExp(r'^(?:rs\.?|inr|\u20B9)\s*\d|^(?:your bank|beneficiary)', caseSensitive: false).hasMatch(t.party) ? 'Unknown recipient' : t.party);
 
   String dayLabel(DateTime d) {
@@ -939,7 +1127,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           Text(t, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
           if (sub != null) Text(sub, style: TextStyle(color: cs.onSurfaceVariant)),
         ])),
-        IconButton(icon: const Icon(Icons.refresh), onPressed: load),
+        IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () async {
+              await load();
+              await syncEmail();
+            }),
       ]));
 
   Widget stat(String label, String value, Color c) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
